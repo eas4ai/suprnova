@@ -1,0 +1,2869 @@
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "version": "",
+      "name": "Pingdom"
+    },
+    "pages": [
+      {
+        "id": "http://suprnova.app/",
+        "title": "http://suprnova.app/",
+        "pageTimings": {
+          "_navigation_timing": {
+            "secureConnectionStart": 1792377929003,
+            "redirectStart": 0,
+            "domContentLoadedEventStart": 1792377929739,
+            "domContentLoadedEventEnd": 1792377929739,
+            "redirectEnd": 0,
+            "fetchStart": 1792377928939,
+            "navigationStart": 1792377928807,
+            "domainLookupEnd": 1792377928939,
+            "connectEnd": 1792377929079,
+            "unloadEventEnd": 0,
+            "requestStart": 1792377929079,
+            "responseEnd": 1792377929203,
+            "unloadEventStart": 0,
+            "domLoading": 1792377929157,
+            "connectStart": 1792377928939,
+            "loadEventStart": 1792377929740,
+            "responseStart": 1792377929154,
+            "loadEventEnd": 1792377929740,
+            "domComplete": 1792377929740,
+            "domInteractive": 1792377929206,
+            "domainLookupStart": 1792377928939
+          },
+          "onLoad": 933,
+          "_fullyLoaded": 1134,
+          "onContentLoad": 932
+        },
+        "startedDateTime": "2026-10-19T02:45:28.809343Z"
+      }
+    ],
+    "entries": [
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:28.809343Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "http://suprnova.app/",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate"
+            },
+            {
+              "name": "connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "host",
+              "value": "suprnova.app"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "upgrade-insecure-requests",
+              "value": "1"
+            }
+          ],
+          "headersSize": 507,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0,
+          "send": 0.0680088997,
+          "ssl": 0,
+          "connect": 64.5209997892,
+          "dns": 0.4749894142,
+          "wait": 64.6189898252,
+          "blocked": 0
+        },
+        "time": 129.6829879284,
+        "response": {
+          "status": 302,
+          "cookies": [],
+          "statusText": "Found",
+          "content": {
+            "mimeType": "",
+            "_resourceType": "Redirect",
+            "size": 0
+          },
+          "headers": [
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:28 GMT"
+            },
+            {
+              "name": "content-length",
+              "value": "5"
+            },
+            {
+              "name": "location",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 111,
+          "redirectURL": "https://suprnova.app/",
+          "httpVersion": "",
+          "bodySize": 0
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:28.940940Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://suprnova.app/",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "upgrade-insecure-requests",
+              "value": "1"
+            }
+          ],
+          "headersSize": 467,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 49.3150024414,
+          "send": 0.1340061426,
+          "ssl": 75.6620019674,
+          "connect": 139.7750079632,
+          "dns": 0,
+          "wait": 74.3039995432,
+          "blocked": 0
+        },
+        "time": 339.1900180578,
+        "response": {
+          "status": 200,
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "/",
+              "httpOnly": true,
+              "secure": true
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "/",
+              "httpOnly": false,
+              "secure": true
+            },
+            {
+              "domain": "",
+              "name": "SameSite",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "statusText": "",
+          "content": {
+            "mimeType": "text/html",
+            "_resourceType": "Document",
+            "size": 38021
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "5a12f25d-f2c6-4223-8265-00da8e81d869"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "set-cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "text/html; charset=utf-8"
+            }
+          ],
+          "headersSize": 535,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 8786
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.160598Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/assets/assets/main-TswHXUyG.css",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "text/css,*/*;q=0.1"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 619,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 105.095993042,
+          "send": 0.1710057259,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 66.4249956608,
+          "blocked": 0.5419999361
+        },
+        "time": 172.2339943647,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "text/css",
+            "_resourceType": "Stylesheet",
+            "size": 452183
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "c3af4f4e-d884-4ca6-ab60-1f4e0198e757"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "text/css; charset=utf-8"
+            }
+          ],
+          "headersSize": 285,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 81277
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.205490Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1218210&theme=neutral&t=1786214859873",
+          "queryString": [
+            {
+              "name": "post_id",
+              "value": "1218210"
+            },
+            {
+              "name": "theme",
+              "value": "neutral"
+            },
+            {
+              "name": "t",
+              "value": "1786214859873"
+            }
+          ],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 458,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 1.7780151367,
+          "send": 0.1019984484,
+          "ssl": 12.0960026979,
+          "connect": 13.9169991016,
+          "dns": 0.4940032959,
+          "wait": 31.2979966402,
+          "blocked": 0.7129907608
+        },
+        "time": 60.3980060816,
+        "response": {
+          "status": 200,
+          "cookies": [
+            {
+              "domain": "producthunt.com",
+              "name": "__cf_bm",
+              "expires": "Mon, 19 Oct 2026 03:15:29 GMT",
+              "value": "redacted",
+              "path": "/",
+              "httpOnly": true,
+              "secure": true
+            }
+          ],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/svg+xml",
+            "_resourceType": "Image",
+            "size": 2063
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "63a48d0e-6f2e-4232-a233-e243d2700f64"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "content-encoding",
+              "value": "br"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=86400"
+            },
+            {
+              "name": "set-cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "age",
+              "value": "235"
+            },
+            {
+              "name": "strict-transport-security",
+              "value": "max-age=2592000; includeSubDomains; preload"
+            },
+            {
+              "name": "expires",
+              "value": "Mon, 19 Oct 2026 06:45:29 GMT"
+            },
+            {
+              "name": "server",
+              "value": "cloudflare"
+            },
+            {
+              "name": "x-runtime",
+              "value": "0.105848"
+            },
+            {
+              "name": "etag",
+              "value": "W/\"910ddede8133e3014581363c35d1d487\""
+            },
+            {
+              "name": "x-permitted-cross-domain-policies",
+              "value": "none"
+            },
+            {
+              "name": "cf-cache-status",
+              "value": "HIT"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=14400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "cf-ray",
+              "value": "a4cc726a6f03ebe3-SJC"
+            },
+            {
+              "name": "referrer-policy",
+              "value": "strict-origin-when-cross-origin"
+            },
+            {
+              "name": "content-type",
+              "value": "image/svg+xml"
+            },
+            {
+              "name": "x-frame-options",
+              "value": "SAMEORIGIN"
+            }
+          ],
+          "headersSize": 981,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 1395
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.205668Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/showcase/audeeoz.webp",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 630,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 1.2759857178,
+          "send": 0.2420097589,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 65.898001194,
+          "blocked": 0.7520020008
+        },
+        "time": 68.1679986715,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/webp",
+            "_resourceType": "Image",
+            "size": 9358
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "3644baf1-71ef-4d10-a8be-16dc1825aacf"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/webp"
+            }
+          ],
+          "headersSize": 272,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 9465
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.205575Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/showcase/eas4ai.webp",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 629,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 1.2470092773,
+          "send": 0.2989917994,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 66.2360042334,
+          "blocked": 0.8379966021
+        },
+        "time": 68.6200019121,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/webp",
+            "_resourceType": "Image",
+            "size": 18512
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "378b23ee-60f7-4838-9023-7aefe37e7894"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/webp"
+            }
+          ],
+          "headersSize": 272,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 18609
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.205880Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/eas4ai.jpg",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 619,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 1.1469726562,
+          "send": 0.2410113811,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 66.5049999952,
+          "blocked": 0.7049888372
+        },
+        "time": 68.5979728699,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/jpeg",
+            "_resourceType": "Image",
+            "size": 12414
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "03a44e92-04f2-42b5-a3a4-60f7ae7387b2"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/jpeg"
+            }
+          ],
+          "headersSize": 272,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 12521
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.205625Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/showcase/devlist.webp",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 630,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 1.0300140381,
+          "send": 0.2689957619,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 66.8440014124,
+          "blocked": 0.7959902287
+        },
+        "time": 68.939001441,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/webp",
+            "_resourceType": "Image",
+            "size": 20450
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "f81b9e17-de47-4022-abb3-0bad6c50e132"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/webp"
+            }
+          ],
+          "headersSize": 272,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 20547
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.160685Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://pls.stonedoubtstudio.com/js/script.js",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 399,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.2910003662,
+          "send": 0.1600086689,
+          "ssl": 73.3689963818,
+          "connect": 138.1999999285,
+          "dns": 0.3539919853,
+          "wait": 65.5769854784,
+          "blocked": 0.1970082521
+        },
+        "time": 278.1479910612,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "application/javascript",
+            "_resourceType": "Script",
+            "size": 3005
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "1337"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding"
+            },
+            {
+              "name": "server",
+              "value": "Cowboy"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400, must-revalidate"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:28 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "application/javascript"
+            }
+          ],
+          "headersSize": 386,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 1545
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.338728Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap",
+          "queryString": [
+            {
+              "name": "family",
+              "value": "Hanken Grotesk:wght@400"
+            },
+            {
+              "name": "family",
+              "value": "JetBrains Mono:wght@400"
+            },
+            {
+              "name": "display",
+              "value": "swap"
+            }
+          ],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "text/css,*/*;q=0.1"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 406,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.3809967041,
+          "send": 0.0689923763,
+          "ssl": 43.3759987354,
+          "connect": 69.2709982395,
+          "dns": 0.3069937229,
+          "wait": 51.0780066252,
+          "blocked": 4.6460032463
+        },
+        "time": 169.1279896498,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "text/css",
+            "_resourceType": "Stylesheet",
+            "size": 18052
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "strict-transport-security",
+              "value": "max-age=31536000"
+            },
+            {
+              "name": "vary",
+              "value": "Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site"
+            },
+            {
+              "name": "expires",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "server",
+              "value": "ESF"
+            },
+            {
+              "name": "last-modified",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "link",
+              "value": "<https://fonts.gstatic.com>; rel=preconnect; crossorigin"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin-allow-popups"
+            },
+            {
+              "name": "cache-control",
+              "value": "private, max-age=86400, stale-while-revalidate=604800"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "x-frame-options",
+              "value": "SAMEORIGIN"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "text/css; charset=utf-8"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 756,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 1429
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.474808Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/hankengrotesk/v12/ieVq2YZDLWuGJpnzaiwFXS9tYvBRzyFLlZg_f_Ncs2Zq5vBM.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.4590148926,
+          "send": 0.2229958773,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 15.5300050974,
+          "blocked": 15.1350051165
+        },
+        "time": 31.3470209837,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 13460
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "13460"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "176810"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 01:38:39 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 27 Aug 2025 19:21:31 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 01:38:39 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 13993
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.473888Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8L6tTOlOV.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.5209960938,
+          "send": 0.3409981728,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 16.22800529,
+          "blocked": 15.9000009298
+        },
+        "time": 32.9900004864,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 21908
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "21908"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "169196"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 03:45:33 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 10 Sep 2025 16:52:37 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 03:45:33 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 22035
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.475083Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxTOlOV.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.4889984131,
+          "send": 0.2610087395,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 17.0259922743,
+          "blocked": 14.8389935493
+        },
+        "time": 32.6149929762,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 21168
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "21168"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "169591"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 03:38:58 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 10 Sep 2025 16:52:38 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 03:38:58 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 21295
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.473804Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/hankengrotesk/v12/ieVq2YZDLWuGJpnzaiwFXS9tYvBRzyFLlZg_f_NcM2Fq5vBM.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.370010376,
+          "send": 0.3000050783,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 17.7809894085,
+          "blocked": 16.0790085793
+        },
+        "time": 34.530013442,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 13860
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "13860"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "161508"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 05:53:41 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 27 Aug 2025 19:21:31 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 05:53:41 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 13955
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.473987Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/hankengrotesk/v12/ieVq2YZDLWuGJpnzaiwFXS9tYvBRzyFLlZg_f_NcbWFq5vBM.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.4290161133,
+          "send": 0.3850013018,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 18.3700025082,
+          "blocked": 15.7520025969
+        },
+        "time": 34.9360225201,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 13780
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "13780"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "170274"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 03:27:35 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 27 Aug 2025 19:21:32 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 03:27:35 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 13898
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.473642Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://fonts.gstatic.com/s/hankengrotesk/v12/ieVq2YZDLWuGJpnzaiwFXS9tYvBRzyFLlZg_f_NcVGFq5vBM.woff2",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 606,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.2929992676,
+          "send": 0.4380047321,
+          "ssl": 15.9309953451,
+          "connect": 15.9389972687,
+          "dns": 0,
+          "wait": 19.0259963274,
+          "blocked": 0
+        },
+        "time": 51.6269929409,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 13844
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "content-length",
+              "value": "13844"
+            },
+            {
+              "name": "x-xss-protection",
+              "value": "0"
+            },
+            {
+              "name": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "name": "cross-origin-resource-policy",
+              "value": "cross-origin"
+            },
+            {
+              "name": "age",
+              "value": "151264"
+            },
+            {
+              "name": "expires",
+              "value": "Sun, 17 Oct 2027 08:44:25 GMT"
+            },
+            {
+              "name": "cross-origin-opener-policy",
+              "value": "same-origin; report-to=\"apps-themes\""
+            },
+            {
+              "name": "server",
+              "value": "sffe"
+            },
+            {
+              "name": "content-security-policy-report-only",
+              "value": "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/apps-themes"
+            },
+            {
+              "name": "last-modified",
+              "value": "Wed, 27 Aug 2025 19:21:32 GMT"
+            },
+            {
+              "name": "report-to",
+              "value": "{\"group\":\"apps-themes\",\"max_age\":2592000,\"endpoints\":[{\"url\":\"https://csp.withgoogle.com/csp/report-to/apps-themes\"}]}"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=31536000"
+            },
+            {
+              "name": "date",
+              "value": "Sat, 17 Oct 2026 08:44:25 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            },
+            {
+              "name": "accept-ranges",
+              "value": "bytes"
+            },
+            {
+              "name": "timing-allow-origin",
+              "value": "*"
+            }
+          ],
+          "headersSize": 828,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 13939
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.474241Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/assets/assets/materialdesignicons-webfont-Dp5v-WZN.woff2?v=7.4.47",
+          "queryString": [
+            {
+              "name": "v",
+              "value": "7.4.47"
+            }
+          ],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/assets/assets/main-TswHXUyG.css"
+            }
+          ],
+          "headersSize": 690,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 55.3520050049,
+          "send": 0.0780075788,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 65.9289956093,
+          "blocked": 0.3069937229
+        },
+        "time": 121.6660019159,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "font/woff2",
+            "_resourceType": "Font",
+            "size": 403216
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "4facc433-63c7-4adf-ba47-46e91b3f83ff"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "font/woff2"
+            }
+          ],
+          "headersSize": 272,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 403623
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.160751Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/android-chrome-512x512.png",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 635,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 207.6380004883,
+          "send": 0.3439933062,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 68.0100023746,
+          "blocked": 1.0240077972
+        },
+        "time": 277.0160039663,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/png",
+            "_resourceType": "Image",
+            "size": 589260
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "78e62b6f-5498-40b3-94ad-d706768c0f7d"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/png"
+            }
+          ],
+          "headersSize": 271,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 589794
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.160962Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://suprnova.app/assets/assets/main-BjmpJyAU.js",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            }
+          ],
+          "headersSize": 447,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 194.8040161133,
+          "send": 0.0679939985,
+          "ssl": 69.4980025291,
+          "connect": 133.9479982853,
+          "dns": 0.4779994488,
+          "wait": 65.853998065,
+          "blocked": 0.7289946079
+        },
+        "time": 465.3790030479,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "text/javascript",
+            "_resourceType": "Script",
+            "size": 459948
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "033cd1d6-a2ef-487b-8707-17705fb453e3"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "text/javascript; charset=utf-8"
+            }
+          ],
+          "headersSize": 292,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 146550
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.748863Z",
+        "cache": {},
+        "request": {
+          "cookies": [
+            {
+              "domain": "",
+              "name": "suprnova_session",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            },
+            {
+              "domain": "",
+              "name": "XSRF-TOKEN",
+              "expires": "",
+              "value": "redacted",
+              "path": "",
+              "httpOnly": false,
+              "secure": false
+            }
+          ],
+          "url": "https://suprnova.app/favicon.ico",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "image/webp,image/apng,image/*,*/*;q=0.8"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "cookie",
+              "value": "fixture-cookie=redacted"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            }
+          ],
+          "headersSize": 620,
+          "bodySize": 0,
+          "method": "GET",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.4889984131,
+          "send": 0.088006258,
+          "ssl": 0,
+          "connect": 0,
+          "dns": 0,
+          "wait": 65.8150017262,
+          "blocked": 0.2269893885
+        },
+        "time": 66.6189957857,
+        "response": {
+          "status": 200,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "image/x-icon",
+            "_resourceType": "Other",
+            "size": 15406
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "200"
+            },
+            {
+              "name": "x-request-id",
+              "value": "ae0fcbad-8096-4f72-99f7-855c215ef6b1"
+            },
+            {
+              "name": "content-encoding",
+              "value": "gzip"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding\nX-Inertia"
+            },
+            {
+              "name": "cache-control",
+              "value": "public, max-age=86400"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "image/x-icon"
+            }
+          ],
+          "headersSize": 274,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 4949
+        }
+      },
+      {
+        "pageref": "http://suprnova.app/",
+        "startedDateTime": "2026-10-19T02:45:29.740787Z",
+        "cache": {},
+        "request": {
+          "cookies": [],
+          "url": "https://pls.stonedoubtstudio.com/api/event",
+          "queryString": [],
+          "headers": [
+            {
+              "name": "origin",
+              "value": "https://suprnova.app"
+            },
+            {
+              "name": "content-length",
+              "value": "79"
+            },
+            {
+              "name": "accept-language",
+              "value": "en-US,en;q=0.8"
+            },
+            {
+              "name": "accept-encoding",
+              "value": "gzip, deflate, br"
+            },
+            {
+              "name": "accept",
+              "value": "*/*"
+            },
+            {
+              "name": "user-agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/61.0.3163.100 Chrome/61.0.3163.100 Safari/537.36 PingdomPageSpeed/1.0 (pingbot/2.0; +http://www.pingdom.com/)"
+            },
+            {
+              "name": "referer",
+              "value": "https://suprnova.app/"
+            },
+            {
+              "name": "pragma",
+              "value": "no-cache"
+            },
+            {
+              "name": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain"
+            }
+          ],
+          "headersSize": 472,
+          "bodySize": 79,
+          "method": "POST",
+          "httpVersion": ""
+        },
+        "timings": {
+          "receive": 0.3609924316,
+          "send": 0.1090019941,
+          "ssl": 69.7389990091,
+          "connect": 134.1969966888,
+          "dns": 2.2269934416,
+          "wait": 65.425992012,
+          "blocked": 0.1910030842
+        },
+        "time": 272.2499786615,
+        "response": {
+          "status": 202,
+          "cookies": [],
+          "statusText": "",
+          "content": {
+            "mimeType": "text/plain",
+            "_resourceType": "Fetch",
+            "size": 2
+          },
+          "headers": [
+            {
+              "name": "status",
+              "value": "202"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "x-plausible-dropped",
+              "value": "1"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": ""
+            },
+            {
+              "name": "cache-control",
+              "value": "max-age=0, private, must-revalidate"
+            },
+            {
+              "name": "vary",
+              "value": "Accept-Encoding"
+            },
+            {
+              "name": "x-request-id",
+              "value": "GN_OOxeXB4s22xgAO8KB"
+            },
+            {
+              "name": "server",
+              "value": "Cowboy"
+            },
+            {
+              "name": "access-control-allow-credentials",
+              "value": "true"
+            },
+            {
+              "name": "date",
+              "value": "Mon, 19 Oct 2026 02:45:29 GMT"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "alt-svc",
+              "value": "h3=\":443\"; ma=2592000"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "headersSize": 415,
+          "redirectURL": "",
+          "httpVersion": "",
+          "bodySize": 247
+        }
+      }
+    ]
+  }
+}
