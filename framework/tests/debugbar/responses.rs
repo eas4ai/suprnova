@@ -52,6 +52,92 @@ async fn dbg_002_injects_before_body_under_the_response_nonce_without_assets() {
 }
 
 #[tokio::test]
+async fn dbg_002_mixed_case_csp_directives_receive_nonce_without_duplicates() {
+    let _mode = debug_mode(true, &[]).await;
+    for policy in [
+        "Script-Src 'self'; Style-Src 'self'",
+        "Default-Src 'NONE'; Script-Src 'NONE'; Style-Src 'NONE'; Script-Src-Elem 'self'; Style-Src-Elem 'self'",
+        "Script-Src 'UNSAFE-INLINE' 'SHA256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; Style-Src 'self'",
+    ] {
+        let app = Harness::new(
+            Router::new()
+                .get("/", move |_: Request| async move {
+                    Ok(HttpResponse::html("<body>mixed case policy</body>")
+                        .header("content-security-policy", policy))
+                })
+                .into(),
+        );
+        let reply = app.get("/", &[("accept", "text/html")]).await;
+        let nonce = reply
+            .body
+            .split(" nonce=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let adjusted = reply.header("content-security-policy").expect("CSP");
+        if policy.starts_with("Default-Src 'NONE'") {
+            assert!(adjusted.contains("connect-src 'self'"));
+        }
+        for name in [
+            "script-src",
+            "style-src",
+            "script-src-elem",
+            "style-src-elem",
+        ] {
+            let directives: Vec<_> = adjusted
+                .split(';')
+                .filter(|directive| {
+                    directive
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|token| token.eq_ignore_ascii_case(name))
+                })
+                .collect();
+            if name.ends_with("-elem") && !policy.to_ascii_lowercase().contains(name) {
+                assert!(directives.is_empty());
+                continue;
+            }
+            assert_eq!(directives.len(), 1, "duplicate {name}: {adjusted}");
+            let sources: Vec<_> = directives[0].split_whitespace().skip(1).collect();
+            assert!(
+                sources.contains(&format!("'nonce-{nonce}'").as_str()),
+                "missing nonce in {name}: {adjusted}"
+            );
+            assert!(
+                !sources
+                    .iter()
+                    .any(|source| source.eq_ignore_ascii_case("'none'"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dbg_002_mixed_case_csp_keywords_preserve_inline_and_existing_nonce_sources() {
+    let _mode = debug_mode(true, &[]).await;
+    for policy in [
+        "default-src 'self' 'UNSAFE-INLINE'",
+        "script-src 'NoNcE-FiXtUrEnOnCe'; style-src 'NONCE-FiXtUrEnOnCe'",
+    ] {
+        let app = Harness::new(
+            Router::new()
+                .get("/", move |_: Request| async move {
+                    Ok(HttpResponse::html("<body>mixed case keywords</body>")
+                        .header("content-security-policy", policy))
+                })
+                .into(),
+        );
+        let reply = app.get("/", &[("accept", "text/html")]).await;
+        assert_eq!(reply.header("content-security-policy"), Some(policy));
+        if policy.contains("NoNcE-") {
+            assert_eq!(reply.body.matches("nonce=\"FiXtUrEnOnCe\"").count(), 3);
+        }
+    }
+}
+
+#[tokio::test]
 async fn dbg_002_excludes_json_redirect_file_stream_head_and_inertia_responses() {
     let _mode = debug_mode(true, &[]).await;
     let app = Harness::new(

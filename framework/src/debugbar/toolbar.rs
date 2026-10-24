@@ -47,8 +47,14 @@ pub(super) fn inject(
         .get(header::CONTENT_SECURITY_POLICY)
         .or_else(|| headers.get(header::CONTENT_SECURITY_POLICY_REPORT_ONLY))
         .and_then(|value| value.to_str().ok())
-        .and_then(|policy| policy.split("'nonce-").nth(1))
-        .and_then(|tail| tail.split('\'').next());
+        .and_then(|policy| {
+            policy
+                .split(';')
+                .flat_map(str::split_whitespace)
+                .filter_map(|source| source.split_once('-'))
+                .filter(|(keyword, _)| keyword.eq_ignore_ascii_case("'nonce"))
+                .find_map(|(_, value)| value.strip_suffix('\''))
+        });
     let nonce = nonce
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
@@ -132,16 +138,19 @@ fn allow_toolbar(policy: &str, nonce: &str) -> String {
         }
     }
     // The framework's isolated development error page otherwise inherits none.
-    if directive(&directives, "connect-src").is_none() && default == "'none'" {
+    if directive(&directives, "connect-src").is_none() && default.eq_ignore_ascii_case("'none'") {
         directives.push("connect-src 'self'".into());
     }
     directives.join("; ")
 }
 
 fn directive(directives: &[String], name: &str) -> Option<usize> {
-    directives
-        .iter()
-        .position(|value| value.split_whitespace().next() == Some(name))
+    directives.iter().position(|value| {
+        value
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case(name))
+    })
 }
 
 fn allow_nonce(directives: &mut Vec<String>, name: &str, inherited: &str, nonce: &str) {
@@ -150,19 +159,28 @@ fn allow_nonce(directives: &mut Vec<String>, name: &str, inherited: &str, nonce:
         || format!("{name} {inherited}"),
         |index| directives[index].clone(),
     );
-    let allows_inline = policy.contains("'unsafe-inline'")
-        && !policy.contains("'nonce-")
-        && !policy.contains("'sha");
+    let keywords = policy.to_ascii_lowercase();
+    let allows_inline = keywords
+        .split_whitespace()
+        .any(|source| source == "'unsafe-inline'")
+        && !keywords.split_whitespace().any(|source| {
+            ["'nonce-", "'sha256-", "'sha384-", "'sha512-"]
+                .iter()
+                .any(|prefix| source.starts_with(prefix))
+        });
+    // CSP keywords ignore ASCII case, but the nonce value keeps its original case.
+    let nonce_value = format!("{nonce}'");
     if allows_inline
         || policy
             .split_whitespace()
-            .any(|source| source == format!("'nonce-{nonce}'"))
+            .filter_map(|source| source.split_once('-'))
+            .any(|(keyword, value)| keyword.eq_ignore_ascii_case("'nonce") && value == nonce_value)
     {
         return;
     }
     let sources = policy
         .split_whitespace()
-        .filter(|source| *source != "'none'")
+        .filter(|source| !source.eq_ignore_ascii_case("'none'"))
         .collect::<Vec<_>>()
         .join(" ");
     let policy = format!("{sources} 'nonce-{nonce}'");
