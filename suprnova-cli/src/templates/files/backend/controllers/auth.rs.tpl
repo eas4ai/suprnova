@@ -35,6 +35,11 @@ use crate::email_address;
 use crate::models::user::User;
 use crate::props::flash::Toast;
 
+/// Laravel's starter kits allow five failed sign-ins per email and address,
+/// then a sixty-second wait. Both numbers are this application's to tune.
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 // ============================================================================
 // Login
 // ============================================================================
@@ -86,7 +91,7 @@ pub async fn login(form: LoginRequest) -> Response {
     // provider, logs the user into the session on success, and issues a
     // remember-me token when requested - all via the named-guard system
     // wired in bootstrap.rs.
-    match LoginThrottle::for_current_request(&form.email)?
+    match LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?
         .attempt(
             &Credentials::password(&form.email, &form.password),
             form.remember,

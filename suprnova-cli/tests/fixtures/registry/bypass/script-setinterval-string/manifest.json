@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-setinterval-string",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

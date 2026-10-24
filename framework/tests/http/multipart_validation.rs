@@ -3348,19 +3348,31 @@ async fn validation_redirect_never_flashes_passwords() {
 
 #[tokio::test]
 async fn login_throttle_context_uses_trusted_http_metadata() {
+    use suprnova::LoginThrottle;
+
     TestContainer::scope(async {
         TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
         let _fake = suprnova::EventFacade::fake();
         let app = App::with(
-            Router::new().post("/login-budget", |_req: Request| async {
-                let throttle = suprnova::LoginThrottle::for_current_request("bad@example.test")?;
+            Router::new().post("/login-budget", |req: Request| async move {
+                let window = std::time::Duration::from_secs(60);
+                for (attempts, window) in [(0, window), (5, std::time::Duration::ZERO)] {
+                    let direct =
+                        LoginThrottle::for_request("bad@example.test", &req, attempts, window);
+                    assert!(direct.is_err());
+                    let current =
+                        LoginThrottle::for_current_request("bad@example.test", attempts, window);
+                    assert!(current.is_err());
+                }
+                let direct = LoginThrottle::for_request("bad@example.test", &req, 5, window)?;
+                let throttle = LoginThrottle::for_current_request("bad@example.test", 5, window)?;
                 for _ in 0..5 {
-                    throttle.hit().await?;
+                    direct.hit().await?;
                 }
                 throttle.ensure_not_rate_limited().await?;
                 Ok(HttpResponse::text("accepted"))
             }),
-            MiddlewareRegistry::new().append(suprnova::LoginThrottle::request_context()),
+            MiddlewareRegistry::new().append(LoginThrottle::request_context()),
         );
         let response = send(
             &app,
@@ -3380,7 +3392,14 @@ async fn login_throttle_context_uses_trusted_http_metadata() {
                 && event.request.method == "POST"
                 && event.request.path == "/login-budget"
         });
-        assert!(suprnova::LoginThrottle::for_current_request("bad@example.test").is_err());
+        assert!(
+            LoginThrottle::for_current_request(
+                "bad@example.test",
+                5,
+                std::time::Duration::from_secs(60),
+            )
+            .is_err()
+        );
     })
     .await;
 }

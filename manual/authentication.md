@@ -932,7 +932,7 @@ get a stream of duplicates on every authenticated request.
 
 `suprnova new` generates an authentication controller that uses
 `LoginThrottle` before `Auth::attempt` against the registered provider. The
-budget allows five failed attempts per sixty seconds for each
+application sets its budget to five failed attempts per sixty seconds for each
 `lowercase(email)|ip` key. It counts unknown accounts too, clears on success,
 and refuses even a correct password while the budget is exhausted.
 `FormRequest` and `Validate`
@@ -948,6 +948,11 @@ use suprnova::{
     handler, inertia_response, redirect, Auth, Credentials, FormRequest,
     InertiaProps, LoginThrottle, Request, Response, Validate, ValidationErrors,
 };
+
+/// Laravel's starter kits allow five failed sign-ins per email and address,
+/// then a sixty-second wait. Both numbers are this application's to tune.
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 // No `errors` prop: the framework seeds `errors` on every Inertia page
 // from the session-flashed validation bag, and an explicit prop of the
@@ -980,7 +985,7 @@ fn invalid_credentials() -> suprnova::FrameworkError {
 
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    match LoginThrottle::for_current_request(&form.email)?.attempt(
+    match LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?.attempt(
         &Credentials::password(&form.email, &form.password),
         form.remember,
     )
@@ -1008,25 +1013,31 @@ bodies, headers and query strings.
 
 ### Add a login budget to an existing application
 
-Replace the login's `Auth::attempt` call with:
+Choose the budget in the application's login code and replace its
+`Auth::attempt` call with:
 
 ```rust
-let user = suprnova::LoginThrottle::for_request(&email, &request)
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+let user = suprnova::LoginThrottle::for_request(&email, &request, LOGIN_ATTEMPTS, LOGIN_WINDOW)?
     .attempt(&credentials, remember)
     .await?;
 ```
 
 When a `FormRequest` consumes the request before the handler runs, install
 `.middleware(suprnova::LoginThrottle::request_context())` on `POST /login`
-and use `LoginThrottle::for_current_request(&form.email)?` as above. Live
-actions use the same middleware on their reserved routes. A missing context
+and use
+`LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?`
+as above. Live actions use the same middleware on their reserved routes. A missing context
 returns a framework error.
 
-`LoginThrottle::new(email, client_ip)` supports custom login paths. Take
+`LoginThrottle::new(email, client_ip, attempts, window)?` supports custom login paths.
+Take
 `client_ip` from `Request::ip()`, which applies trusted-proxy policy, rather
-than from a raw forwarding header or a form field. `with_limits(5, 60)?`
-changes the failure count and decay in seconds; both must be positive.
-`DEFAULT_MAX_ATTEMPTS` and `DEFAULT_DECAY_SECONDS` define the defaults.
+than from a raw forwarding header or a form field. The application chooses
+the attempt count (`u32`) and window (`std::time::Duration`) in every constructor.
+Both must be positive, and the window must be a supported whole-second duration.
 `ensure_not_rate_limited`, `hit`, `clear` and `available_in` expose the
 individual steps and remaining seconds when a custom guard needs them.
 Check before authenticating, hit only on invalid credentials, and clear

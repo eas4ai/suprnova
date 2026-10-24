@@ -1,0 +1,19 @@
+@font-face {
+  font-family: "Acme Icons";
+  src: url("/fonts/acme-icons.woff2") format("woff2");
+}
+
+.acme-disclosure {
+  --acme-disclosure-gap: 0.5rem;
+  display: grid;
+  gap: var(--acme-disclosure-gap);
+}
+
+.acme-disclosure-toggle {
+  background: url(/icons/toggle.svg) no-repeat right center;
+  font-family: "Acme Icons", system-ui;
+}
+
+.acme-disclosure[data-open] .acme-disclosure-icon {
+  transform: rotate(90deg);
+}

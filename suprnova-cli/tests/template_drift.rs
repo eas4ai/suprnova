@@ -2735,11 +2735,25 @@ fn debugbar_is_installed_in_all_rendered_bootstraps() {
 
 #[test]
 fn session_login_templates_install_the_login_attempt_budget() {
-    for path in [
-        "src/templates/files/backend/controllers/auth.rs.tpl",
-        "src/templates/files/live/src/live/login_form.rs.tpl",
+    for (path, email) in [
+        (
+            "src/templates/files/backend/controllers/auth.rs.tpl",
+            "form.email",
+        ),
+        (
+            "src/templates/files/live/src/live/login_form.rs.tpl",
+            "input.email",
+        ),
     ] {
         let source = read(path);
+        assert!(source.contains(&format!(
+            "LoginThrottle::for_current_request(&{email}, LOGIN_ATTEMPTS, LOGIN_WINDOW)"
+        )));
+        assert!(source.contains("const LOGIN_ATTEMPTS: u32 = 5;"));
+        assert!(source.contains(
+            "const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);"
+        ));
+        assert!(source.contains("Both numbers are this application's to tune."));
         let call = source
             .find("LoginThrottle::for_")
             .expect("login must use LoginThrottle");

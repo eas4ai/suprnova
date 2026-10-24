@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-create-iframe",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

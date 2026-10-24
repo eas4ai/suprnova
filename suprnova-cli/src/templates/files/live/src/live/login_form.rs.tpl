@@ -15,6 +15,11 @@ use super::{FieldErrors, failed, redirect};
 use crate::email_address;
 use crate::flash::Toast;
 
+/// Laravel's starter kits allow five failed sign-ins per email and address,
+/// then a sixty-second wait. Both numbers are this application's to tune.
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The rules the form checks before it asks for the account.
 #[derive(Validate)]
 struct LoginInput {
@@ -60,7 +65,7 @@ impl LoginForm {
         // `Auth::attempt` verifies the password through the registered user
         // provider, logs the user into the session on success, and issues a
         // remember-me token when asked.
-        let throttle = LoginThrottle::for_current_request(&input.email)
+        let throttle = LoginThrottle::for_current_request(&input.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)
             .map_err(|error| failed("signing in", error))?;
         let user = match throttle
             .attempt(
