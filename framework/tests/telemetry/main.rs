@@ -1,6 +1,0 @@
-//! Integration tests for the `telemetry` module: one binary per module,
-//! one former top-level test file per submodule (folded 2026-09-05).
-
-pub mod feature_gate;
-pub mod integration;
-pub mod signal_paths;
