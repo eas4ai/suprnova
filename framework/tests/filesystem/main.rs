@@ -1,0 +1,26 @@
+//! Integration tests for the `filesystem` module: one binary per module,
+//! one former top-level test file per submodule (folded 2026-09-05).
+
+#[path = "../support/common.rs"]
+mod common;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
+
+pub mod atomic_writes;
+pub mod copy_atomicity;
+pub mod default_disk;
+pub mod disk_ext;
+pub mod disk_responses;
+pub mod filesystem;
+pub mod laravel_infra_gaps;
+pub mod path_traversal;
+pub mod public_url;
+pub mod read_through;
+pub mod read_through_options;
+
+/// Verifies the added Laravel behaviours through the shared delta mechanism.
+// `opendal`, `Storage` and `Storage::fake` compile with the `filesystem` and `testing` features alone.
+#[cfg(all(feature = "filesystem", feature = "testing"))]
+pub mod laravel_delta;
