@@ -9,6 +9,10 @@ use crate::database::{clauses::quote_identifier, placeholder::placeholder, valid
 
 const EARTH_RADIUS_KM: f64 = 6371.0;
 const KM_PER_MILE: f64 = 1.609344;
+/// Rows this far beyond a radius still count as inside: one micrometre, so a
+/// row at exactly the radius, or two coordinates naming the same point at a
+/// pole, are not lost to floating-point rounding in the SQL formula.
+const RADIUS_TOLERANCE_KM: f64 = 1e-9;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct GeoQuery {
@@ -31,7 +35,8 @@ impl<M: EloquentModel> Builder<M> {
     /// The model declares `geo(lat = "latitude", lng = "longitude")`. Coordinates
     /// are degrees and distances are kilometres unless [`Self::in_miles`] is used.
     /// Returns an error before database access for non-finite or out-of-range
-    /// coordinates, or a model without declared coordinate columns.
+    /// coordinates, or a model without declared coordinate columns. A row whose
+    /// latitude or longitude is NULL has no distance and is never nearby.
     pub fn nearby(mut self, lat: f64, lng: f64) -> Result<Self, FrameworkError> {
         if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
             return Err(FrameworkError::param(
@@ -62,6 +67,8 @@ impl<M: EloquentModel> Builder<M> {
     /// Returns an error before database access unless [`Self::nearby`] precedes
     /// this call and the radius is finite and non-negative. Repeated calls keep
     /// the smallest radius. [`Self::in_miles`] sets the unit for the whole query.
+    /// Rows up to one micrometre beyond the radius count as inside, so rounding
+    /// in the SQL formula never drops a row at the radius.
     pub fn within(mut self, radius: f64) -> Result<Self, FrameworkError> {
         if !self.geo.has_origin() {
             return Err(FrameworkError::param("within requires a preceding nearby"));
@@ -179,10 +186,17 @@ impl GeoQuery {
         values: &mut Vec<Value>,
         n: &mut usize,
     ) -> Result<Option<String>, FrameworkError> {
-        let (Some(origin), Some(radius)) = (&self.origin, self.radius) else {
+        let Some(origin) = &self.origin else {
             return Ok(None);
         };
         let (lat, lng) = origin.columns(backend, table);
+        // A row without both coordinates has no distance. Excluding it here keeps
+        // every engine in agreement; otherwise Postgres's GREATEST drops the NULL
+        // and reports distance zero while SQLite and MySQL sort the row apart.
+        let located = format!("{lat} IS NOT NULL AND {lng} IS NOT NULL");
+        let Some(radius) = self.radius else {
+            return Ok(Some(located));
+        };
         let (min_lat, max_lat, min_lng, max_lng) = origin.bounds(radius / self.earth_radius());
         let low_lat = bind(backend, min_lat, values, n)?;
         let high_lat = bind(backend, max_lat, values, n)?;
@@ -196,9 +210,14 @@ impl GeoQuery {
         let distance = self
             .distance(backend, table, values, n)?
             .ok_or_else(|| FrameworkError::internal("geo radius lost its origin"))?;
-        let radius = bind(backend, radius, values, n)?;
+        let tolerance = if self.miles {
+            RADIUS_TOLERANCE_KM / KM_PER_MILE
+        } else {
+            RADIUS_TOLERANCE_KM
+        };
+        let radius = bind(backend, radius + tolerance, values, n)?;
         Ok(Some(format!(
-            "{lat} BETWEEN {low_lat} AND {high_lat} AND {longitude} AND {distance} <= {radius}"
+            "{located} AND {lat} BETWEEN {low_lat} AND {high_lat} AND {longitude} AND {distance} <= {radius}"
         )))
     }
 }
