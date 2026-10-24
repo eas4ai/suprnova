@@ -351,7 +351,7 @@ impl RecommendConfig {
     fn validate_graph_store(&self) -> Result<(), FrameworkError> {
         if !matches!(
             self.graph_store.as_str(),
-            "database" | "memgraph" | "hydradb"
+            "database" | "memgraph" | "neo4j" | "hydradb"
         ) {
             return Err(FrameworkError::param(
                 "RECOMMEND_GRAPH_STORE: expected database, memgraph, neo4j or hydradb",
