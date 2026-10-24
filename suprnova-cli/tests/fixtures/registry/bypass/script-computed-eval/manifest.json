@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-computed-eval",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
