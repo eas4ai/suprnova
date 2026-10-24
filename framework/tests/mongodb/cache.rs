@@ -672,23 +672,3 @@ async fn mongodb_touch_forget_and_flush() {
     );
     cleanup(&connection, &names).await;
 }
-
-#[tokio::test]
-#[ignore = "needs MONGODB_TEST_URL"]
-async fn mongodb_capped_reads_check_bytes_before_returning_the_value() {
-    let (store, connection, names) = store_on_server("capped:").await;
-    store.put_raw("text", "éé", None).await.unwrap();
-    assert!(store.get_raw_capped("text", 3).await.is_err());
-    assert_eq!(
-        store.get_raw_capped("text", 4).await.unwrap().as_deref(),
-        Some("éé")
-    );
-    assert!(store.get_raw_capped("missing", 4).await.unwrap().is_none());
-    store.put_raw("number", "12345", None).await.unwrap();
-    assert!(store.get_raw_capped("number", 4).await.is_err());
-    assert_eq!(
-        store.get_raw_capped("number", 5).await.unwrap().as_deref(),
-        Some("12345")
-    );
-    cleanup(&connection, &names).await;
-}

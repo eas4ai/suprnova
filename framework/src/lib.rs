@@ -501,9 +501,9 @@ pub use pagination::{
     Paginated, Pagination, Paginator,
 };
 pub use process::{
-    DEFAULT_STOP_GRACE as DEFAULT_PROCESS_STOP_GRACE, DEFAULT_TIMEOUT as DEFAULT_PROCESS_TIMEOUT,
-    InvokedPool, InvokedProcess, OutputKind, PendingProcess, Pipe, Pool, PoolResults, Process,
-    ProcessEnvValue, ProcessError, ProcessResult, Signal,
+    DEFAULT_STOP_GRACE as DEFAULT_PROCESS_STOP_GRACE, InvokedPool, InvokedProcess, OutputKind,
+    PendingProcess, Pipe, Pool, PoolResults, Process, ProcessEnvValue, ProcessError, ProcessResult,
+    Signal,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use process::{

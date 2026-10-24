@@ -16,14 +16,19 @@ pub(crate) type OutputCallback = Box<dyn FnMut(OutputKind, &str) + Send>;
 /// that left its group and still holds the pipes.
 const READER_GRACE: Duration = Duration::from_secs(2);
 
+/// Sampling cadence, not a deadline. Only a caller's hang window can kill a child.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
 /// A process that is running, or has run, from [`PendingProcess::start`].
 ///
 /// Its timeout and idle timeout hold whether or not anything waits on it: a
 /// watchdog kills it, with everything it started, when one passes, and
 /// [`wait`](Self::wait) then returns the timeout error. Dropping it before
 /// it is waited on kills it with everything it started.
-/// Output over 8 MiB per stream or 12 MiB combined also kills the process
-/// tree and makes `wait` return [`ProcessError::OutputLimitExceeded`].
+/// Caller-set output ceilings and hang windows also kill the process tree.
+/// Without configured limits it runs until it exits, keeping output in memory
+/// unless capture is disabled. A monitor records CPU and output progress even
+/// when no hang window is set.
 pub struct InvokedProcess {
     command: String,
     inner: Inner,
@@ -146,11 +151,16 @@ struct CapturedState {
     out_read: usize,
     err_read: usize,
     last_output: Instant,
+    last_progress: Instant,
+    cpu_ticks: Option<u64>,
     open_streams: usize,
     quiet: bool,
     started: Instant,
     timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
+    hang_after: Option<Duration>,
+    max_stream_output_bytes: Option<usize>,
+    max_combined_output_bytes: Option<usize>,
     /// Set when a timeout or output limit killed the process.
     expired: Option<Expiry>,
 }
@@ -166,24 +176,26 @@ impl CapturedState {
             OutputKind::Out => (self.out_bytes, "stdout"),
             OutputKind::Err => (self.err_bytes, "stderr"),
         };
-        let exceeded = if bytes.len() > super::MAX_STREAM_OUTPUT_BYTES - used {
-            Some(Expiry::Output {
-                stream,
-                limit: super::MAX_STREAM_OUTPUT_BYTES,
-            })
-        } else if bytes.len() > super::MAX_COMBINED_OUTPUT_BYTES - self.out_bytes - self.err_bytes {
-            Some(Expiry::Output {
-                stream: "combined",
-                limit: super::MAX_COMBINED_OUTPUT_BYTES,
-            })
-        } else {
-            None
-        };
+        let exceeded = self
+            .max_stream_output_bytes
+            .filter(|limit| bytes.len() > limit.saturating_sub(used))
+            .map(|limit| Expiry::Output { stream, limit })
+            .or_else(|| {
+                self.max_combined_output_bytes
+                    .filter(|limit| {
+                        bytes.len() > limit.saturating_sub(self.out_bytes + self.err_bytes)
+                    })
+                    .map(|limit| Expiry::Output {
+                        stream: "combined",
+                        limit,
+                    })
+            });
         if let Some(expiry) = exceeded {
             self.expired = Some(expiry);
             return false;
         }
         self.last_output = Instant::now();
+        self.last_progress = self.last_output;
         let (count, buffer) = match kind {
             OutputKind::Out => (&mut self.out_bytes, &mut self.out),
             OutputKind::Err => (&mut self.err_bytes, &mut self.err),
@@ -204,10 +216,10 @@ impl CapturedState {
         let idle = self
             .idle_timeout
             .and_then(|timeout| self.last_output.checked_add(timeout));
-        match (total, idle) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let hang = self
+            .hang_after
+            .and_then(|window| self.last_progress.checked_add(window));
+        [total, idle, hang].into_iter().flatten().min()
     }
 
     /// The timeout that has passed at `now`, if one has.
@@ -230,9 +242,33 @@ impl CapturedState {
         }
         None
     }
+
+    /// Only the monitor decides this, immediately after sampling CPU progress.
+    fn hung(&self, now: Instant) -> Option<Expiry> {
+        let idle = now.saturating_duration_since(self.last_progress);
+        self.hang_after
+            .filter(|window| idle >= *window)
+            .map(|_| Expiry::Hung(idle))
+    }
 }
 
 impl Captured {
+    /// The program lock pins the pid while procfs is read. CPU time belongs
+    /// to the child itself; descendants' CPU time is deliberately excluded.
+    fn sample_progress(&self, target: Target) {
+        let program = self.program();
+        if program.released {
+            return;
+        }
+        if let Some(ticks) = cpu_time(target.pid) {
+            let mut state = self.lock();
+            if state.expired.is_none() && state.cpu_ticks.is_some_and(|previous| ticks > previous) {
+                state.last_progress = Instant::now();
+            }
+            state.cpu_ticks = Some(ticks);
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, CapturedState> {
         self.state
             .lock()
@@ -285,12 +321,18 @@ impl Captured {
 enum Expiry {
     Timeout(Duration),
     Idle(Duration),
+    Hung(Duration),
     Output { stream: &'static str, limit: usize },
 }
 
 impl Expiry {
     fn error(self, command: &str, result: ProcessResult) -> ProcessError {
         match self {
+            Expiry::Hung(idle) => ProcessError::Hung {
+                command: command.to_owned(),
+                idle,
+                result: Box::new(result),
+            },
             Expiry::Output { stream, limit } => ProcessError::OutputLimitExceeded {
                 command: command.to_owned(),
                 stream,
@@ -480,11 +522,16 @@ impl InvokedProcess {
                 out_read: 0,
                 err_read: 0,
                 last_output: now,
+                last_progress: now,
+                cpu_ticks: cpu_time(target.pid),
                 open_streams: 0,
                 quiet: pending.quietly,
                 started: now,
                 timeout: pending.timeout,
                 idle_timeout: pending.idle_timeout,
+                hang_after: pending.hang_after,
+                max_stream_output_bytes: pending.max_stream_output_bytes,
+                max_combined_output_bytes: pending.max_combined_output_bytes,
                 expired: None,
             }),
             callback: Mutex::new(callback),
@@ -523,8 +570,7 @@ impl InvokedProcess {
                 let _ = stdin.shutdown().await;
             });
         }
-        let watchdog = (pending.timeout.is_some() || pending.idle_timeout.is_some())
-            .then(|| tokio::spawn(watchdog(Arc::clone(&captured), target)));
+        let watchdog = Some(tokio::spawn(watchdog(Arc::clone(&captured), target)));
 
         Ok(Self {
             command,
@@ -980,6 +1026,10 @@ impl Real {
             state.out.clone(),
             state.err.clone(),
         )
+        .with_liveness(
+            state.last_progress.into_std(),
+            state.last_progress.elapsed(),
+        )
     }
 
     /// The result of a process that is finished with: the captured output
@@ -989,6 +1039,8 @@ impl Real {
         let mut state = self.captured.lock();
         let out = std::mem::take(&mut state.out);
         let err = std::mem::take(&mut state.err);
+        let last_progress = state.last_progress;
+        let idle_duration = last_progress.elapsed();
         drop(state);
         ProcessResult::new(
             command.to_owned(),
@@ -996,6 +1048,7 @@ impl Real {
             out,
             err,
         )
+        .with_liveness(last_progress.into_std(), idle_duration)
     }
 }
 
@@ -1124,44 +1177,70 @@ async fn reap(captured: &Captured) -> std::io::Result<ExitStatus> {
 /// holds its id, until something waits on it.
 async fn watchdog(captured: Arc<Captured>, target: Target) {
     loop {
+        if captured.program().released {
+            return;
+        }
         let deadline = {
             let state = captured.lock();
             if state.expired.is_some() {
                 return;
             }
-            state.deadline()
-        };
-        let Some(deadline) = deadline else {
-            return;
+            state.deadline().map_or_else(
+                || Instant::now() + PROGRESS_INTERVAL,
+                |deadline| deadline.min(Instant::now() + PROGRESS_INTERVAL),
+            )
         };
         tokio::time::sleep_until(deadline).await;
+        captured.sample_progress(target);
         let expired = {
-            let mut state = captured.lock();
-            let due = state.expired.or_else(|| state.due(Instant::now()));
-            if due.is_some() {
-                state.expired = due;
+            // Do not expire a child already reaped by the owner. The same
+            // lock pins its pid through the decision and the kill.
+            let program = captured.program();
+            if program.released {
+                return;
             }
-            due.is_some()
+            let expired = {
+                let mut state = captured.lock();
+                let now = Instant::now();
+                state.expired = state
+                    .expired
+                    .or_else(|| state.due(now))
+                    .or_else(|| state.hung(now));
+                state.expired.is_some()
+            };
+            if expired {
+                #[cfg(test)]
+                reap_race::watchdog_parked(target.pid);
+                target.send_all(Signal::Kill);
+                #[cfg(test)]
+                reap_race::watchdog_sent(target.pid);
+            }
+            expired
         };
         if expired {
-            // Checked and sent under one hold of the lock the reap takes, so
-            // the program cannot be reaped in between.
-            {
-                let program = captured.program();
-                if !program.released {
-                    #[cfg(test)]
-                    reap_race::watchdog_parked(target.pid);
-                    target.send_all(Signal::Kill);
-                    #[cfg(test)]
-                    reap_race::watchdog_sent(target.pid);
-                }
-            }
             captured.changed.notify_one();
             #[cfg(unix)]
             reap_killed(&captured).await;
             return;
         }
     }
+}
+
+/// Linux proc_pid_stat(5): utime and stime are fields 14 and 15, in clock
+/// ticks. The command in parentheses may itself contain spaces or parentheses.
+#[cfg(target_os = "linux")]
+fn cpu_time(pid: Option<u32>) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid?)).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let mut fields = fields.split_whitespace().skip(11);
+    let user = fields.next()?.parse::<u64>().ok()?;
+    let system = fields.next()?.parse::<u64>().ok()?;
+    user.checked_add(system)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_time(_pid: Option<u32>) -> Option<u64> {
+    None
 }
 
 /// Reap a program the watchdog killed, once its output has closed.

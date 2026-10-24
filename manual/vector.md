@@ -197,8 +197,8 @@ Vector::register("docs-private", Arc::new(
 ));
 ```
 
-Successful Pinecone JSON replies are capped at 16 MiB while reading;
-error excerpts remain capped at 8 KiB. An oversized success reply returns an error.
+Successful Pinecone replies are read in full and decoded as JSON. Failures
+include an excerpt of the error response.
 
 **Throughput.** Nothing serializes. The driver caches a host string per index, not a connection handle, and requests share `reqwest`'s connection pool - so concurrent calls to the same index proceed concurrently. (The gRPC driver this replaces held one `Index` per name behind a `tokio::Mutex`, because `pinecone-sdk` exposed `Index` only behind `&mut self`.)
 

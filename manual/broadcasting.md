@@ -998,9 +998,8 @@ and `get` return the service's JSON answer.
 
 Every request carries Pusher's signature, with `body_md5` only for a
 request that has a body. An error names the status and up to 200 bytes
-of the answer, never the secret or a signature. JSON answers are capped at
-2 MiB and error bodies at 8 KiB while reading; an oversized body returns an
-error. `trigger_batch`
+of the answer, never the secret or a signature. JSON answers and error
+bodies are read in full before decoding or excerpting. `trigger_batch`
 publishes to the service only, not to the in-process hub. Pusher
 Channels takes at most 10 events per batch and answers a larger batch
 with an error, which `trigger_batch` returns.

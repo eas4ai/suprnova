@@ -9,13 +9,53 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-/// One shared limit across concurrent calls of the process driver.
-const MAX_CONCURRENT_PROCESSES: usize = 8;
-static PROCESS_SLOTS: tokio::sync::Semaphore =
-    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_PROCESSES);
+/// Caller-selected limits for the process driver. Every limit defaults to none.
+/// Clones share the configured concurrency ceiling across calls.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessDriverOptions {
+    timeout: Option<Duration>,
+    hang_after: Option<Duration>,
+    max_stream_output_bytes: Option<usize>,
+    max_combined_output_bytes: Option<usize>,
+    slots: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl ProcessDriverOptions {
+    /// Set a per-child deadline. Zero disables it.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = (!timeout.is_zero()).then_some(timeout);
+        self
+    }
+
+    /// Kill a child after this long without CPU or output progress.
+    /// See [`crate::process::PendingProcess::hang_after`]. Zero disables it.
+    pub fn hang_after(mut self, duration: Duration) -> Self {
+        self.hang_after = (!duration.is_zero()).then_some(duration);
+        self
+    }
+
+    /// At most this many children across calls sharing these options.
+    /// Zero removes the ceiling.
+    pub fn max_concurrency(mut self, children: usize) -> Self {
+        self.slots = (children != 0).then(|| Arc::new(tokio::sync::Semaphore::new(children)));
+        self
+    }
+
+    /// Kill a child if either output stream exceeds this many bytes.
+    pub fn max_stream_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_stream_output_bytes = Some(bytes);
+        self
+    }
+
+    /// Kill a child if stdout and stderr together exceed this many bytes.
+    pub fn max_combined_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_combined_output_bytes = Some(bytes);
+        self
+    }
+}
 
 /// The hidden console command that runs one task in a console process.
 pub(crate) const RUN_COMMAND: &str = "concurrency:run";
@@ -63,10 +103,10 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// run in `SUPRNOVA_CONCURRENCY_TOKEN`. The hidden command finds the task
 /// in that binary's registry, runs it, and writes the outcome, with the
 /// token, on its standard output, which this driver reads back. The tasks
-/// run in separate address spaces and runtimes, with at most eight children
-/// across all calls. Each child has a 60-second default deadline. The Process
-/// facade kills its process tree on timeout or output over 8 MiB per stream
-/// or 12 MiB combined. An explicit nonzero timeout replaces the default.
+/// run in separate address spaces and runtimes. The driver enforces only the
+/// deadline, concurrency ceiling, output ceilings and hang window the caller
+/// configures. Without a configured limit a child runs until it exits and its
+/// output stays in memory.
 ///
 /// The binary is the one
 /// [`Concurrency::console_command`](super::Concurrency::console_command)
@@ -88,8 +128,33 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessConcurrencyDriver;
 
+#[derive(Debug, Clone)]
+struct ConfiguredProcessDriver {
+    options: ProcessDriverOptions,
+}
+
+impl ProcessConcurrencyDriver {
+    /// A driver with caller-selected limits, reusable through `Concurrency::extend`.
+    pub fn with_options(options: ProcessDriverOptions) -> impl ConcurrencyDriver + Clone {
+        ConfiguredProcessDriver { options }
+    }
+}
+
 #[async_trait]
 impl ConcurrencyDriver for ProcessConcurrencyDriver {
+    async fn run(
+        &self,
+        tasks: Vec<Task>,
+        timeout: Option<Duration>,
+    ) -> Vec<Result<TaskResult, FrameworkError>> {
+        Self::with_options(ProcessDriverOptions::default())
+            .run(tasks, timeout)
+            .await
+    }
+}
+
+#[async_trait]
+impl ConcurrencyDriver for ConfiguredProcessDriver {
     async fn run(
         &self,
         tasks: Vec<Task>,
@@ -99,17 +164,21 @@ impl ConcurrencyDriver for ProcessConcurrencyDriver {
             Ok(command) => command,
             Err(error) => return tasks.iter().map(|_| Err(error.clone())).collect(),
         };
+        let width = tasks.len().max(1);
+        let options = &self.options;
         stream::iter(tasks.into_iter().map(|task| {
             let command = &command;
             async move {
-                let _slot = PROCESS_SLOTS
-                    .acquire()
-                    .await
-                    .expect("process semaphore stays open");
-                run_one(command, task, timeout).await
+                let _slot = match &options.slots {
+                    Some(slots) => {
+                        Some(slots.acquire().await.expect("process semaphore stays open"))
+                    }
+                    None => None,
+                };
+                run_one(command, task, timeout.or(options.timeout), options).await
             }
         }))
-        .buffered(MAX_CONCURRENT_PROCESSES)
+        .buffered(width)
         .collect()
         .await
     }
@@ -120,6 +189,7 @@ async fn run_one(
     command: &[String],
     task: Task,
     timeout: Option<Duration>,
+    options: &ProcessDriverOptions,
 ) -> Result<TaskResult, FrameworkError> {
     let name = task.name().to_owned();
     let input = serde_json::to_vec(task.input()?).map_err(|error| {
@@ -137,11 +207,19 @@ async fn run_one(
     let pending = Process::command(arguments)
         .env(TOKEN_ENV, token.as_str())
         .input(input);
-    let pending = pending.timeout(
-        timeout
-            .filter(|value| !value.is_zero())
-            .unwrap_or(crate::process::DEFAULT_TIMEOUT),
-    );
+    let mut pending = pending;
+    if let Some(timeout) = timeout {
+        pending = pending.timeout(timeout);
+    }
+    if let Some(window) = options.hang_after {
+        pending = pending.hang_after(window);
+    }
+    if let Some(bytes) = options.max_stream_output_bytes {
+        pending = pending.max_stream_output_bytes(bytes);
+    }
+    if let Some(bytes) = options.max_combined_output_bytes {
+        pending = pending.max_combined_output_bytes(bytes);
+    }
     match pending.run().await {
         Ok(result) => read_outcome(&name, &token, &result),
         Err(ProcessError::TimedOut { timeout, .. }) => Err(timed_out(&name, timeout)),
@@ -180,7 +258,9 @@ fn read_outcome(
             .strip_prefix(':')
     });
     match envelope.map(serde_json::from_str::<Envelope>) {
-        Some(Ok(Envelope::Ok(value))) if result.successful() => Ok(TaskResult::new(name, value)),
+        Some(Ok(Envelope::Ok(value))) if result.successful() => {
+            Ok(TaskResult::new(name, value).with_process_liveness(result))
+        }
         Some(Ok(Envelope::Ok(_))) => Err(FrameworkError::internal(format!(
             "concurrent task `{name}` did not succeed: `{}` ended with {} after a line that \
              reads as a success outcome, and only a console process that ends with exit \

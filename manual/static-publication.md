@@ -258,8 +258,7 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.2", def
 
 ### Cloudflare and R2
 
-Cloudflare API replies are capped at 2 MiB while reading; an oversized reply
-returns an error.
+Cloudflare API replies are read in full before the JSON envelope is decoded.
 
 An R2 bucket with a custom domain is the whole setup: the bucket is the
 publication disk, the custom domain serves it, Cloudflare's cache sits in
@@ -373,9 +372,8 @@ CloudFront uses AWS signed requests with the same credential provider chain
 as the S3 disk. It reads the complete distribution configuration and its ETag,
 changes the selected origin's path, sends `If-Match`, waits for deployment and
 creates invalidations. Static keys can be passed from `S3Config`; otherwise
-the AWS profile or instance role supplies credentials. API replies are capped
-at 2 MiB and credential replies at 64 KiB while reading; an oversized reply
-returns an error.
+the AWS profile or instance role supplies credentials. API and credential
+replies are read in full.
 
 The default `cdn-cloudfront` feature supplies the driver independently of SQS.
 Register the publication disk and construct the driver from its configuration:

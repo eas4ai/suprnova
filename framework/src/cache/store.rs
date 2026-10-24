@@ -39,18 +39,6 @@ pub trait CacheStore: Send + Sync {
     /// Retrieve a raw JSON value from the cache by key
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError>;
 
-    /// Retrieve at most `max` bytes, checking size before transferring or copying
-    /// the value. Custom stores must implement this to support SQS overflow.
-    async fn get_raw_capped(
-        &self,
-        _key: &str,
-        _max: usize,
-    ) -> Result<Option<String>, FrameworkError> {
-        Err(FrameworkError::internal(
-            "this cache store must implement CacheStore::get_raw_capped to support SQS overflow",
-        ))
-    }
-
     /// Store a raw JSON value in the cache.
     ///
     /// `None` ttl means **no expiration**. Callers that want to apply a

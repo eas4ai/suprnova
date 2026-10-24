@@ -134,11 +134,6 @@ const OVERFLOW_ROOT: &str = "sqs-payloads";
 /// Laravel's `SqsQueue` writes.
 const POINTER_KEY: &str = "@pointer";
 
-// One 1 MiB message, JSON escaping and receipt metadata fit within this budget.
-const MAX_ACTION_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CREDENTIAL_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_OVERFLOW_BYTES: usize = 25 * 1024 * 1024;
-
 /// The keys the driver signs with, in place of the default credential chain
 /// of AWS.
 #[derive(Clone)]
@@ -217,7 +212,7 @@ impl SqsOverflow {
         validate_pointer(path, queue_key)?;
         if let Some(store) = self.cache()? {
             return store
-                .get_raw_capped(path, MAX_OVERFLOW_BYTES)
+                .get_raw(path)
                 .await?
                 .map(String::into_bytes)
                 .ok_or_else(|| {
@@ -226,38 +221,18 @@ impl SqsOverflow {
                     ))
                 });
         }
-        use futures::StreamExt;
-        let disk = self.operator()?;
-        let fail = |error| {
-            FrameworkError::internal(format!("SQS: could not read overflow payload: {error}"))
-        };
-        if disk.stat(path).await.map_err(fail)?.content_length() > MAX_OVERFLOW_BYTES as u64 {
-            return Err(overflow_size_error());
-        }
-        let reader = disk
-            .reader_with(path)
-            .chunk(64 * 1024)
+        self.operator()?
+            .read(path)
             .await
-            .map_err(fail)?;
-        // Check actual bytes too, including an object changed after stat.
-        let mut stream = reader.into_bytes_stream(..).await.map_err(fail)?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                FrameworkError::internal(format!("SQS: could not stream overflow payload: {error}"))
-            })?;
-            if chunk.len() > MAX_OVERFLOW_BYTES - bytes.len() {
-                return Err(overflow_size_error());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
+            .map(|buffer| buffer.to_bytes().to_vec())
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SQS: could not read the overflow payload '{path}': {error}"
+                ))
+            })
     }
 
     async fn write(&self, path: &str, bytes: Vec<u8>) -> Result<(), FrameworkError> {
-        if bytes.len() > MAX_OVERFLOW_BYTES {
-            return Err(overflow_size_error());
-        }
         if let Some(store) = self.cache()? {
             let text = String::from_utf8(bytes).map_err(|error| {
                 FrameworkError::internal(format!("SQS: overflow payload is not text: {error}"))
@@ -604,12 +579,9 @@ impl reqsign_core::HttpSend for ReqwestSend {
             })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let bytes = crate::http_client::read_capped(response, MAX_CREDENTIAL_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                reqsign_core::Error::unexpected("read an AWS credential response")
-                    .with_source(error)
-            })?;
+        let bytes = response.bytes().await.map_err(|error| {
+            reqsign_core::Error::unexpected("read an AWS credential response").with_source(error)
+        })?;
         let mut out = http::Response::new(bytes);
         *out.status_mut() = status;
         *out.headers_mut() = headers;
@@ -896,11 +868,9 @@ impl SqsQueueDriver {
                 }
             })?;
         let status = response.status();
-        let bytes = crate::http_client::read_capped(response, MAX_ACTION_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                Failure::Unknown(FrameworkError::internal(format!("SQS {action}: {error}")))
-            })?;
+        let bytes = response.bytes().await.map_err(|error| {
+            Failure::Unknown(FrameworkError::internal(format!("SQS {action}: {error}")))
+        })?;
         let reply: Option<Value> = if bytes.is_empty() {
             Some(Value::Null)
         } else {
@@ -1627,12 +1597,6 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
         Ok(wait) => seconds(wait, MAX_DELAY_SECS),
         Err(_) => 0,
     }
-}
-
-fn overflow_size_error() -> FrameworkError {
-    FrameworkError::internal(format!(
-        "SQS: overflow payload exceeds the {MAX_OVERFLOW_BYTES}-byte cap"
-    ))
 }
 
 /// Accept only a canonical UUID filename in this endpoint, region and queue's directory.

@@ -10,7 +10,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 - **A debug bar.** With debug on, `DebugBar::middleware()` records each
   request: method, path, route pattern and parameters, request id, status,
-  the time spent in every middleware and in the handler, memory, session and
+  the time spent in every middleware and in the handler, the process's peak
+  RSS growth while the request ran (`peak_rss_growth_bytes`), session and
   authenticated principal, locale; every query with its SQL, bindings and
   duration, and every transaction; cache reads and writes with hit or miss;
   events and their listeners; mail, notifications and queued jobs;
@@ -36,7 +37,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   SQLite build without math functions the framework registers them on each
   connection. The three compose with the builder's other clauses,
   existence queries (`where_has` keeps the radius), eager loads and limited
-  eager loads, scalar reads, joined writes and pagination. Invalid input is
+  eager loads, scalar reads, joined writes and pagination. A row whose
+  latitude or longitude is NULL is never nearby, and the radius comparison
+  allows one micrometre so rounding never drops a row at the radius or two
+  coordinates naming the same point at a pole. Invalid input is
   refused before any SQL runs: a latitude outside -90..90, a longitude
   outside -180..180, a non-finite or negative radius, or `within` and
   `order_by_distance()` without a preceding `nearby` (`manual/eloquent.md`).
@@ -72,6 +76,67 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   statement the Memgraph driver issues is checked per dialect, and each
   driver's conformance runs as engine-named tests against the real engine
   (`manual/recommendations.md`, `manual/env-vars.md`).
+
+### Changed
+
+- **Classic validation redirects no longer flash secrets.** A form request
+  that fails parsing or validation and redirects back excludes `password`,
+  `password_confirmation` and `current_password` from the old input it
+  flashes, at every nesting level, plus any name the request lists through
+  `FormRequest::dont_flash`. Old input for every other field is unchanged
+  (`manual/validation.md`).
+- **HydraDB over plaintext HTTP is for development and testing only.**
+  `RECOMMEND_GRAPH_STORE=hydradb` with an `http://` loopback URL is accepted
+  when the environment is local, development or testing; in production,
+  which an unset `APP_ENV` means, the URL must be `https://` and boot says so.
+  The loopback client also bypasses `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`,
+  so a development token never leaves the host through an environment proxy
+  (`manual/recommendations.md`, `manual/env-vars.md`).
+- **The documentation builder stays inside its source root.** A TOC link
+  that is absolute, that climbs with `..`, or that resolves through a symlink
+  to a file outside the configured source directory fails the build with an
+  error naming the TOC line, instead of publishing that file's content.
+- **Documentation plugin assets inherit page privacy.** An asset referenced
+  only by private pages is served only to a request the gate admits; an asset
+  any public page references stays public (`manual/docs-site.md`).
+- **Process tasks report progress and may be watched for hangs.** The
+  process concurrency driver and the `Process` facade sample each child's
+  progress, its CPU time on Linux and the bytes it writes, and expose the
+  last progress instant and the idle duration. `hang_after(duration)` kills a
+  child whose progress has stopped for that long with `ProcessError::Hung`
+  naming the idle time. Nothing is killed and nothing is capped unless the
+  caller sets a deadline, a hang window, a concurrency ceiling or an output
+  ceiling; the defaults are unchanged (`manual/processes.md`,
+  `manual/concurrency.md`).
+
+### Security
+
+- **Payment adapters refuse malformed signature timestamps and provider
+  IDs.** The Paddle webhook verifier checks the header timestamp's range and
+  the replay window before handing it to the SDK, so an extreme value is
+  refused as a bad signature instead of reaching arithmetic that can panic.
+  Every provider ID the Stripe and Paddle adapters place in a request path
+  must be one path segment; a slash, a query or a dot segment is refused as a
+  validation error before any request. NowPayments already validated its
+  IDs (`manual/payments-stripe.md`, `manual/payments-paddle.md`).
+- **SQS overflow pointers are checked before use.** A received message that
+  points at an overflow object is read or deleted only when the pointer
+  carries the current queue's prefix and a canonical UUID; any other pointer
+  is refused, so a foreign message cannot name another cache or disk key
+  (`manual/queues.md`).
+- **A login attempt budget for session sign-in.** `LoginThrottle` counts
+  failed attempts per lower-cased email and client IP, five per sixty
+  seconds as Laravel's starters do, reports the seconds to wait, clears on
+  success and dispatches a `Lockout` event when the budget is spent. The
+  React, Svelte, Vue and Live scaffolds and the dogfood application call it
+  before `Auth::attempt`; `Auth::attempt` itself is unchanged, so an existing
+  application adopts it with one call (`manual/authentication.md`).
+
+### Fixed
+
+- **`suprnova live:check` no longer reports a missing view for a Live topic.**
+  A registered topic is a subscription with no view to render; the checker
+  skips topic descriptors and counts only renderable components.
 
 ## 4.6.2 - 2026-10-23
 

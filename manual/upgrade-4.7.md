@@ -11,13 +11,15 @@ matches an entry in the 4.7.0 [changelog](../CHANGELOG.md).
 ## How to use this chapter
 
 Find the changelog entry below, then read **Before**, **Now** and **Do**.
-All of 4.7.0 is new features you adopt when you want them: the debug bar,
+Most of 4.7.0 is new features you adopt when you want them: the debug bar,
 nearest-location queries, the documentation site plugin, the segmented date
 picker and two graph stores. None of them changes an application that does not
-use it. Two steps are worth taking on the day you upgrade: install the debug
-bar, which the scaffolds now install for new applications, and regenerate the
-frontend types if you mount the documentation plugin, because it adds three
-tools to the agents endpoint.
+use it. Three changes can need an edit: a production HydraDB store configured
+over plaintext HTTP, a classic form that relied on a password field coming back
+in old input, and a documentation TOC that linked outside its source folder.
+Two steps are worth taking on the day you upgrade: install the debug bar, which
+the scaffolds now install for new applications, and call `LoginThrottle` from
+your session login, which the scaffolds now do for new applications.
 
 ## Upgrade in this order
 
@@ -142,6 +144,116 @@ adopt one, enable its feature and set the store and connection variables; the
 Recommendations chapter gives the HydraDB endpoint shape and the rebuild
 command.
 
+## Changed entries
+
+### Classic validation redirects no longer flash secrets.
+
+**Before:** a classic HTML form request that failed validation flashed every
+field into the session's old input, passwords included.
+
+**Now:** `password`, `password_confirmation` and `current_password` are
+excluded at every nesting level, and a request excludes more names through
+`FormRequest::dont_flash`.
+
+**Do:** nothing, unless a form of yours read a password back from old input;
+it will be empty, as it is in Laravel.
+
+### HydraDB over plaintext HTTP is for development and testing only.
+
+**Before:** `RECOMMEND_GRAPH_URL=http://127.0.0.1:...` was accepted for the
+HydraDB store in every environment.
+
+**Now:** it is accepted when `APP_ENV` is local, development or testing. In
+production, which an unset `APP_ENV` means, boot refuses it and names
+`https://`. The loopback client bypasses environment proxies.
+
+**Do:** if a production application reaches HydraDB over plaintext loopback,
+put TLS in front of it and use an `https://` URL before upgrading.
+
+### The documentation builder stays inside its source root.
+
+**Before:** a TOC link could name an absolute path, climb with `..`, or follow
+a symlink out of the source folder, and the file's content was published.
+
+**Now:** the build fails with an error that names the TOC line.
+
+**Do:** nothing, unless your TOC linked outside the folder on purpose; move
+the file inside it.
+
+### Documentation plugin assets inherit page privacy.
+
+**Before:** an asset carried only its set's or version's privacy.
+
+**Now:** an asset referenced only by private pages needs the gate's
+admission; an asset any public page references stays public.
+
+**Do:** nothing. If a private page shares an asset with a public page, the
+asset is public by design; give the private page its own copy to hide it.
+
+### Process tasks report progress and may be watched for hangs.
+
+**Before:** a child process ran until it exited or hit the deadline you set,
+and the driver knew nothing about its progress.
+
+**Now:** the driver samples each child's progress (CPU time on Linux and the
+bytes it writes) and reports the last progress instant and the idle
+duration. `hang_after(duration)` kills a child whose progress stopped for
+that long, with `ProcessError::Hung` naming the idle time. No deadline, hang
+window, concurrency ceiling or output ceiling applies unless you set it.
+
+**Do:** nothing. To detect hung tasks, call `.hang_after(...)` with a window
+measured for your workload, as [Processes](processes.md) shows; a long task
+that keeps working is never killed by it.
+
+## Security entries
+
+### SQS overflow pointers are checked before use.
+
+**Before:** a received message beginning with `@` named any cache or disk key,
+which was read whole and deleted on acknowledgement.
+
+**Now:** the pointer must carry the current queue's prefix and a canonical
+UUID; anything else is refused before any read or delete.
+
+**Do:** nothing, unless something other than the framework writes overflow
+pointers to your queue; those pointers must carry the queue prefix and a UUID.
+
+### Payment adapters refuse malformed signature timestamps and provider IDs.
+
+**Before:** the Paddle verifier handed the header timestamp straight to the
+SDK, and provider IDs went into request paths as given.
+
+**Now:** an out-of-range or out-of-window timestamp is a signature error
+before any SDK arithmetic, and a Stripe or Paddle ID that is not one path
+segment is a validation error before any request.
+
+**Do:** nothing. An ID that carried a slash or a query never reached the
+provider correctly before.
+
+### A login attempt budget for session sign-in.
+
+**Before:** nothing in the framework or the scaffolds limited repeated wrong
+passwords.
+
+**Now:** `LoginThrottle` counts failures per lower-cased email and client IP,
+five per sixty seconds, reports the seconds to wait, clears on success and
+dispatches `Lockout`. New scaffolds call it before `Auth::attempt`.
+`Auth::attempt` is unchanged.
+
+**Do:** in an existing application's login handler, replace the
+`Auth::attempt` call with
+`LoginThrottle::for_request(&email, &request).attempt(&credentials, remember).await?`.
+When a `FormRequest` consumes the request first, install
+`LoginThrottle::request_context()` on the login route and use
+`LoginThrottle::for_current_request(&form.email)?` instead, as
+[Authentication](authentication.md) shows. Without that call nothing changes.
+
+## Fixed entries with no upgrade step
+
+- **`suprnova live:check` no longer reports a missing view for a Live
+  topic.** A whole-application check that failed only on a
+  `suprnova.topic.<hash>` component passes now. Nothing to change.
+
 ## Next
 
 - [Debug Bar](debugbar.md) documents the panels, the gate and the record
@@ -153,4 +265,7 @@ command.
 - [Live](live.md) documents the component library, the segmented date picker
   included.
 - [Recommendations](recommendations.md) documents the graph stores.
+- [Authentication](authentication.md) documents the login attempt budget.
+- [Processes](processes.md) documents progress and `hang_after`.
+- [Validation](validation.md) documents old input and `dont_flash`.
 - [Upgrading to 4.6](upgrade-4.6.md) covers the preceding release.

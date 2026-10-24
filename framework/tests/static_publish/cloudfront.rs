@@ -83,9 +83,7 @@ impl Mock {
                                 headers: parts.headers,
                                 body: String::from_utf8(bytes.to_vec()).unwrap(),
                             };
-                            if request.path != "/credentials" {
-                                verify_signature(&request);
-                            }
+                            verify_signature(&request);
                             requests.lock().unwrap().push(request);
                             let reply = script.lock().unwrap().pop_front().unwrap_or(Reply {
                                 status: 500,
@@ -641,72 +639,14 @@ async fn pub_003_round4_1_cloudfront_reads_selection_relative_to_the_s3_root() {
 }
 
 #[tokio::test]
-async fn cloudfront_rejects_oversized_api_body() {
-    let server = Mock::start(vec![Reply::config(format!(
-        "{CONFIG}{}",
+async fn cloudfront_reads_a_complete_api_body_without_a_driver_size_ceiling() {
+    let mock = Mock::start(vec![Reply::ok(format!(
+        "<Invalidation/> {}",
         " ".repeat(2 * 1024 * 1024)
     ))])
     .await;
-    let error = server
-        .driver()
-        .switch_version("bounded")
+    mock.driver()
+        .purge(Purge::Prefix("/".into()))
         .await
-        .map(|_| ())
-        .expect_err("oversized response must fail");
-    assert!(error.to_string().contains("byte cap"), "{error}");
-}
-
-#[tokio::test]
-async fn cloudfront_rejects_oversized_credential_response() {
-    use crate::env_snapshot::{EnvSnapshot, set_env};
-    let _env = crate::env_lock::lock_env_async().await;
-    let _restore = EnvSnapshot::capture(&[
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_EC2_METADATA_DISABLED",
-        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-        "AWS_CONFIG_FILE",
-        "AWS_SHARED_CREDENTIALS_FILE",
-    ]);
-    let body = format!(
-        "{}{}",
-        serde_json::json!({"AccessKeyId":"AKIDCLOUDFRONTTEST","SecretAccessKey":SECRET,"Token":"test-token","Expiration":"2099-01-01T00:00:00Z"}),
-        " ".repeat(64 * 1024)
-    );
-    let mock = Mock::start(vec![Reply::ok(body), Reply::config(CONFIG)]).await;
-    for name in [
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-    ] {
-        set_env(name, None);
-    }
-    set_env("AWS_EC2_METADATA_DISABLED", Some("true"));
-    set_env(
-        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-        Some(&format!("{}credentials", mock.endpoint)),
-    );
-    set_env("AWS_CONFIG_FILE", Some("/nonexistent-dbk-config"));
-    set_env(
-        "AWS_SHARED_CREDENTIALS_FILE",
-        Some("/nonexistent-dbk-credentials"),
-    );
-    let driver = CloudFrontDriver::new("DISTRIBUTION1", "public-pages", &S3Config::default())
-        .unwrap()
-        .with_response_headers_function(FUNCTION)
-        .unwrap()
-        .with_mock_endpoint(&mock.endpoint)
         .unwrap();
-    assert!(
-        driver.switch_version("bounded").await.is_err(),
-        "oversized credentials must fail"
-    );
-    assert!(
-        mock.requests()
-            .iter()
-            .all(|request| request.path == "/credentials")
-    );
 }
