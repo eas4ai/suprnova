@@ -33,11 +33,6 @@ impl<M: EloquentModel> Builder<M> {
     /// Returns an error before database access for non-finite or out-of-range
     /// coordinates, or a model without declared coordinate columns.
     pub fn nearby(mut self, lat: f64, lng: f64) -> Result<Self, FrameworkError> {
-        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-            return Err(FrameworkError::param(
-                "nearby latitude must be finite and within -90..90",
-            ));
-        }
         if !lng.is_finite() || !(-180.0..=180.0).contains(&lng) {
             return Err(FrameworkError::param(
                 "nearby longitude must be finite and within -180..180",
@@ -198,7 +193,7 @@ impl GeoQuery {
             .ok_or_else(|| FrameworkError::internal("geo radius lost its origin"))?;
         let radius = bind(backend, radius, values, n)?;
         Ok(Some(format!(
-            "{distance} <= {radius}"
+            "{lat} BETWEEN {low_lat} AND {high_lat} AND {longitude} AND {distance} <= {radius}"
         )))
     }
 }
