@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-unicode-escape",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

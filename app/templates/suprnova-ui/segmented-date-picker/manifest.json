@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.segmented-date-picker",
+  "files": [
+    "segmented-date-picker.html",
+    "segmented-date-picker.css",
+    "segmented-date-picker.js",
+    "date-core.js",
+    "value-scroller.js"
+  ],
+  "elements": ["sn-segmented-date"]
+}
