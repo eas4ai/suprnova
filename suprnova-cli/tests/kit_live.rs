@@ -910,7 +910,16 @@ mod cli {
 fn kit_live_login_installs_the_login_attempt_budget() {
     let app = Scaffold::new();
     let login = app.read("src/live/login_form.rs");
-    assert!(login.contains("LoginThrottle::for_current_request(&input.email)"));
+    assert!(login.contains(
+        "LoginThrottle::for_current_request(&input.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)"
+    ));
+    assert!(login.contains("const LOGIN_ATTEMPTS: u32 = 5;"));
+    assert!(
+        login.contains(
+            "const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);"
+        )
+    );
+    assert!(login.contains("Both numbers are this application's to tune."));
     assert!(contains(
         &login,
         ".attempt(&Credentials::password(&input.email, &input.password), self.remember,)"

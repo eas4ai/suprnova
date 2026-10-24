@@ -236,16 +236,27 @@ provider correctly before.
 passwords.
 
 **Now:** `LoginThrottle` counts failures per lower-cased email and client IP,
-five per sixty seconds, reports the seconds to wait, clears on success and
-dispatches `Lockout`. New scaffolds call it before `Auth::attempt`.
+reports the seconds to wait, clears on success and dispatches `Lockout`.
+New scaffolds choose five attempts per sixty seconds in their application
+code and call it before `Auth::attempt`.
 `Auth::attempt` is unchanged.
 
 **Do:** in an existing application's login handler, replace the
-`Auth::attempt` call with
-`LoginThrottle::for_request(&email, &request).attempt(&credentials, remember).await?`.
+`Auth::attempt` call with:
+
+```rust
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+let user = LoginThrottle::for_request(&email, &request, LOGIN_ATTEMPTS, LOGIN_WINDOW)?
+    .attempt(&credentials, remember)
+    .await?;
+```
+
+Both numbers are the application's to tune. Every constructor requires them.
 When a `FormRequest` consumes the request first, install
 `LoginThrottle::request_context()` on the login route and use
-`LoginThrottle::for_current_request(&form.email)?` instead, as
+`LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?` instead, as
 [Authentication](authentication.md) shows. Without that call nothing changes.
 
 ## Fixed entries with no upgrade step

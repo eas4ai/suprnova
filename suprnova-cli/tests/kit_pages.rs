@@ -400,7 +400,14 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
     fn kit_login_installs_the_login_attempt_budget() {
         each_kit(|app| {
             let source = app.read("src/controllers/auth.rs");
-            assert!(source.contains("LoginThrottle::for_current_request(&form.email)?"));
+            assert!(source.contains(
+                "LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?"
+            ));
+            assert!(source.contains("const LOGIN_ATTEMPTS: u32 = 5;"));
+            assert!(source.contains(
+                "const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);"
+            ));
+            assert!(source.contains("Both numbers are this application's to tune."));
             assert!(contains(
                 &source,
                 ".attempt(&Credentials::password(&form.email, &form.password), form.remember,)"

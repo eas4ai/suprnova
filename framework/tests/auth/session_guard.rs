@@ -16,6 +16,7 @@ use sea_orm_migration::MigratorTrait;
 use sea_orm_migration::prelude::*;
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
@@ -1144,9 +1145,9 @@ fn login_throttle_blocks_sixth_attempt_and_correct_password_until_expiry() {
         let _fake = EventFacade::fake();
         TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
         run_in_request(async {
-            let throttle = suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1")
-                .with_limits(5, 1)
-                .unwrap();
+            let throttle =
+                suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1", 5, Duration::from_secs(1))
+                    .unwrap();
             let wrong = Credentials::password("a@b.com", "wrong");
             for _ in 0..5 {
                 assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
@@ -1187,32 +1188,44 @@ fn login_throttle_blocks_sixth_attempt_and_correct_password_until_expiry() {
 }
 
 #[test]
-fn login_throttle_defaults_normalize_email_isolate_ips_and_clear_success() {
+fn login_throttle_normalizes_email_isolates_ips_and_clears_success() {
     in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
         TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
         run_in_request(async {
-            let throttle = suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1");
-            let same = suprnova::LoginThrottle::new("a@b.com", "192.0.2.1");
-            let other = suprnova::LoginThrottle::new("a@b.com", "192.0.2.2");
+            let throttle =
+                suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1", 3, Duration::from_secs(90))
+                    .unwrap();
+            let same =
+                suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", 3, Duration::from_secs(90))
+                    .unwrap();
+            let other =
+                suprnova::LoginThrottle::new("a@b.com", "192.0.2.2", 3, Duration::from_secs(90))
+                    .unwrap();
             let wrong = Credentials::password("a@b.com", "wrong");
             let correct = Credentials::password("a@b.com", "secret");
-            for _ in 0..4 {
+            for _ in 0..2 {
                 assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
             }
             assert!(same.attempt(&correct, false).await.unwrap().is_some());
             assert_eq!(throttle.available_in().await.unwrap(), 0);
-            for _ in 0..5 {
+            for _ in 0..3 {
                 assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
             }
-            assert!((59..=60).contains(&throttle.available_in().await.unwrap()));
+            assert!((89..=90).contains(&throttle.available_in().await.unwrap()));
             assert!(same.attempt(&correct, false).await.is_err());
             assert!(other.attempt(&correct, false).await.unwrap().is_some());
             // The guard remains opt-in: its original public entry point has no budget.
             assert!(Auth::attempt(&correct, false).await.unwrap().is_some());
-            let unknown = suprnova::LoginThrottle::new("missing@b.com", "192.0.2.1");
-            for _ in 0..5 {
+            let unknown = suprnova::LoginThrottle::new(
+                "missing@b.com",
+                "192.0.2.1",
+                3,
+                Duration::from_secs(90),
+            )
+            .unwrap();
+            for _ in 0..3 {
                 assert!(
                     unknown
                         .attempt(&Credentials::password("missing@b.com", "wrong"), false)
@@ -1233,19 +1246,28 @@ fn login_throttle_defaults_normalize_email_isolate_ips_and_clear_success() {
 #[test]
 fn login_throttle_validates_limits_and_requires_trusted_request_context() {
     assert!(
-        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
-            .with_limits(0, 60)
-            .is_err()
+        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", 0, Duration::from_secs(60)).is_err()
+    );
+    assert!(suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", 5, Duration::ZERO).is_err());
+    assert!(suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", 5, Duration::MAX).is_err());
+    assert!(
+        suprnova::LoginThrottle::new(
+            "a@b.com",
+            "192.0.2.1",
+            5,
+            Duration::from_secs(i64::MAX as u64),
+        )
+        .is_err()
+    );
+    for window in [Duration::from_nanos(1), Duration::from_millis(1500)] {
+        assert!(suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", 5, window).is_err());
+    }
+    assert!(
+        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1", u32::MAX, Duration::from_secs(60))
+            .is_ok()
     );
     assert!(
-        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
-            .with_limits(5, 0)
+        suprnova::LoginThrottle::for_current_request("a@b.com", 5, Duration::from_secs(60))
             .is_err()
     );
-    assert!(
-        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
-            .with_limits(5, u64::MAX)
-            .is_err()
-    );
-    assert!(suprnova::LoginThrottle::for_current_request("a@b.com").is_err());
 }

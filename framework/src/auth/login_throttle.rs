@@ -1,6 +1,7 @@
-//! Starter login budgets, separate from the authentication guard.
+//! Application-chosen login budgets, separate from the authentication guard.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::events::EventFacade;
 use crate::rate_limit::RateLimiter;
@@ -35,7 +36,7 @@ tokio::task_local! {
     static LOGIN_REQUEST: LoginThrottleRequest;
 }
 
-/// Laravel starter-style password failure budget, keyed by lowercase(email)|ip.
+/// Password failure budget chosen by the application, keyed by lowercase(email)|ip.
 ///
 /// This is opt-in for existing applications. `Auth::attempt` stays unchanged.
 #[derive(Clone, Debug)]
@@ -47,76 +48,86 @@ pub struct LoginThrottle {
 }
 
 impl LoginThrottle {
-    /// Failed attempts allowed before the next login is refused.
-    pub const DEFAULT_MAX_ATTEMPTS: i64 = 5;
-    /// Default fixed window in seconds, starting at the first failure.
-    pub const DEFAULT_DECAY_SECONDS: u64 = 60;
-
+    /// Build a login budget with the attempts and window the application chooses.
+    /// Both must be positive, and the window must be a supported whole-second duration.
     /// Use the trusted client address from `Request::ip`, never a raw proxy header.
-    pub fn new(email: &str, client_ip: &str) -> Self {
-        Self {
+    pub fn new(
+        email: &str,
+        client_ip: &str,
+        attempts: u32,
+        window: Duration,
+    ) -> Result<Self, FrameworkError> {
+        if attempts == 0 {
+            return Err(FrameworkError::param("login max_attempts must be positive"));
+        }
+        let decay_seconds = window.as_secs();
+        let supported_deadline = i64::try_from(decay_seconds)
+            .ok()
+            .and_then(|seconds| chrono::Utc::now().timestamp().checked_add(seconds));
+        if decay_seconds == 0
+            || window.subsec_nanos() != 0
+            || supported_deadline.is_none()
+            || std::time::Instant::now().checked_add(window).is_none()
+        {
+            return Err(FrameworkError::param(
+                "login window must be a positive supported whole-second duration",
+            ));
+        }
+        Ok(Self {
             key: format!("{}|{client_ip}", email.to_lowercase()),
             request: LoginThrottleRequest {
                 ip: client_ip.to_owned(),
                 method: String::new(),
                 path: String::new(),
             },
-            max_attempts: Self::DEFAULT_MAX_ATTEMPTS,
-            decay_seconds: Self::DEFAULT_DECAY_SECONDS,
-        }
+            max_attempts: i64::from(attempts),
+            decay_seconds,
+        })
     }
 
-    /// Build the budget and lockout metadata from the current HTTP request.
-    pub fn for_request(email: &str, request: &Request) -> Self {
-        Self::from_context(email, LoginThrottleRequest::from_request(request))
+    /// Build the application's chosen budget and trusted HTTP lockout metadata.
+    pub fn for_request(
+        email: &str,
+        request: &Request,
+        attempts: u32,
+        window: Duration,
+    ) -> Result<Self, FrameworkError> {
+        Self::from_context(
+            email,
+            LoginThrottleRequest::from_request(request),
+            attempts,
+            window,
+        )
     }
 
-    fn from_context(email: &str, request: LoginThrottleRequest) -> Self {
-        let mut throttle = Self::new(email, &request.ip);
+    fn from_context(
+        email: &str,
+        request: LoginThrottleRequest,
+        attempts: u32,
+        window: Duration,
+    ) -> Result<Self, FrameworkError> {
+        let mut throttle = Self::new(email, &request.ip, attempts, window)?;
         throttle.request = request;
-        throttle
+        Ok(throttle)
     }
 
-    /// For Live actions behind [`Self::request_context`]. Missing middleware
-    /// returns an error rather than using client-controlled action arguments.
-    pub fn for_current_request(email: &str) -> Result<Self, FrameworkError> {
+    /// Use the application's chosen budget for Live actions behind [`Self::request_context`].
+    /// Missing middleware returns an error rather than using client-controlled action arguments.
+    pub fn for_current_request(
+        email: &str,
+        attempts: u32,
+        window: Duration,
+    ) -> Result<Self, FrameworkError> {
         LOGIN_REQUEST
-            .try_with(|request| Self::from_context(email, request.clone()))
+            .try_with(|request| Self::from_context(email, request.clone(), attempts, window))
             .map_err(|_| {
                 FrameworkError::internal("LoginThrottle requires its request_context middleware")
-            })
+            })?
     }
 
     /// Capture trusted request metadata for Live actions in this request only.
     pub fn request_context() -> impl Middleware {
         LoginRequestContext
-    }
-
-    /// Override the default failure count and window. Both must be positive.
-    pub fn with_limits(
-        mut self,
-        max_attempts: i64,
-        decay_seconds: u64,
-    ) -> Result<Self, FrameworkError> {
-        if max_attempts <= 0 {
-            return Err(FrameworkError::param("login max_attempts must be positive"));
-        }
-        let supported_deadline = i64::try_from(decay_seconds)
-            .ok()
-            .and_then(|seconds| chrono::Utc::now().timestamp().checked_add(seconds));
-        if decay_seconds == 0
-            || supported_deadline.is_none()
-            || std::time::Instant::now()
-                .checked_add(std::time::Duration::from_secs(decay_seconds))
-                .is_none()
-        {
-            return Err(FrameworkError::param(
-                "login decay_seconds must be a positive supported duration",
-            ));
-        }
-        self.max_attempts = max_attempts;
-        self.decay_seconds = decay_seconds;
-        Ok(self)
     }
 
     /// Seconds remaining in the current window, or zero when it has expired.
@@ -154,7 +165,7 @@ impl LoginThrottle {
         RateLimiter::clear(&self.key).await
     }
 
-    /// Check the budget, attempt the default guard, then count failure or clear
+    /// Check the budget, call `Auth::attempt`, then count failure or clear
     /// success. Existing applications can replace their `Auth::attempt` call.
     pub async fn attempt(
         &self,

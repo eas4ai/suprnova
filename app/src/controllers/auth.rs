@@ -29,6 +29,11 @@ use suprnova::{
 use crate::middleware::authenticate::remember_return_to;
 use crate::models::users::User;
 
+/// Laravel's starter kits allow five failed sign-ins per email and address,
+/// then a sixty-second wait. Both numbers are this application's to tune.
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Where a sign-in or a registration goes when no address is intended.
 const HOME: &str = "/";
 
@@ -95,7 +100,7 @@ fn invalid_credentials() -> FrameworkError {
 /// `bootstrap::register` binds, start the session, and continue.
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    match LoginThrottle::for_current_request(&form.email)?
+    match LoginThrottle::for_current_request(&form.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)?
         .attempt(
             &Credentials::password(&form.email, &form.password),
             form.remember,
