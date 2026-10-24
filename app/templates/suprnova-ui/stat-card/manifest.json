@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.stat-card",
+  "version": 1,
+  "root": "suprnova-ui/stat-card",
+  "files": [
+    "stat-card.html",
+    "stat-card.css"
+  ],
+  "elements": []
+}
