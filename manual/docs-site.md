@@ -126,13 +126,14 @@ Depth-first order defines both the navigation and the corpus indexes.
 
 Use Markdown links such as `[Install](guides/install.md)` or
 `[Welcome](../index.md#overview)`. HTML links resolve within the current version
-and language; the `.md` suffix is removed while query strings and fragments
-stay intact. Leading-slash content links resolve from that version's root.
+and language; the `.md` suffix on page links is removed while query strings
+and fragments stay intact. Leading-slash content links resolve from that
+version's root.
 External URLs and fragment links stay as written. Images in `_assets` resolve
 to `/docs/v2/_assets/...`, shared by that version's languages. Assets are
 snapshotted at boot and served with their MIME type. Symlinks in assets are
-refused. Keep confidential assets in a private version or set; a page's privacy
-does not make a shared version asset private.
+refused. Asset privacy follows the page references described under
+[Private pages](#private-pages).
 
 ## Versions and languages
 
@@ -167,6 +168,13 @@ A set has `"private": true` at the manifest root; a version has
 application supplies a gate. The gate can inspect the request and `DocsAccess`
 (version, language and optional page path), or use [authorization](authorization.md).
 A path of `None` checks a whole set/version for indexes or shared assets.
+
+At boot, the plugin tracks Markdown links and images to each version's assets
+across all its languages. An asset referenced only by private pages is private
+and requires the gate to admit the request, including direct requests to its
+URL. Any public page reference keeps the asset public. Assets with no page
+references inherit the set or version's privacy. A private set or version keeps
+all its assets private.
 
 ```rust
 use suprnova::{Auth, FrameworkError};

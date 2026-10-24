@@ -16,6 +16,10 @@ can cancel it, and you can read its state. The rest is Paddle's.
 This chapter assumes you've read [Payments](payments.md) for the generic
 five-trait surface. Here we cover what is true *only* for Paddle.
 
+Methods that put a provider ID in a request path require a nonempty ID
+containing only ASCII letters, digits, `_` or `-`. Other values return
+`PaymentError::Validation` before any provider request.
+
 ## When to pick Paddle
 
 Pick Paddle when one or more is true:
@@ -459,13 +463,14 @@ paddle.archive_customer("ctm_123").await?;
 ## Webhook signature verification
 
 Paddle signs every webhook with HMAC. The `Paddle-Signature` header looks
-like `ts=1716000000,h1=abcdef…`. The adapter delegates verification to
+like `ts=1716000000;h1=abcdef…`. The adapter rejects malformed digests and
+timestamps more than five seconds in the past or future before calling
 `Paddle::unmarshal` from the SDK, which:
 
 - Parses the header
 - Recomputes the HMAC using your `PADDLE_WEBHOOK_KEY`
-- Rejects signatures whose timestamp is outside `MaximumVariance::default()`
-  (5 seconds in paddle-rust-sdk 0.18, the version the adapter pins - replays older than that are dropped)
+- Rejects signatures older than `MaximumVariance::default()`
+  (5 seconds in paddle-rust-sdk 0.18, the version the adapter pins)
 
 The framework's `webhook_routes` handler calls `verify` before doing
 anything else; a failure returns `401 invalid-signature` with no body

@@ -338,11 +338,11 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             }
             let bootstrap = app.read("src/bootstrap.rs");
             assert!(bootstrap.contains("on_model_scoped::<crate::models::note::Note>"));
-            assert!(bootstrap.contains("instance == &format!(\"notes.{principal}\")"));
-            assert!(
-                app.read("src/live/mod.rs")
-                    .contains(".topic_family(\"notes\")?")
-            );
+            // The principal scope moved from bootstrap.rs into live/mod.rs when the
+            // scaffold became rustfmt-clean (93ba81560); the guard itself is unchanged.
+            let live = app.read("src/live/mod.rs");
+            assert!(live.contains("instance == &format!(\"notes.{principal}\")"));
+            assert!(live.contains(".topic_family(\"notes\")?"));
             let dashboard = match app.kit {
                 "react" => app.read("frontend/src/pages/Dashboard.tsx"),
                 "svelte" => app.read("frontend/src/pages/Dashboard.svelte"),
@@ -394,6 +394,22 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
     fn contains(haystack: &str, needle: &str) -> bool {
         let squash = |text: &str| text.split_whitespace().collect::<String>();
         squash(haystack).contains(&squash(needle))
+    }
+
+    #[test]
+    fn kit_login_installs_the_login_attempt_budget() {
+        each_kit(|app| {
+            let source = app.read("src/controllers/auth.rs");
+            assert!(source.contains("LoginThrottle::for_current_request(&form.email)?"));
+            assert!(contains(
+                &source,
+                ".attempt(&Credentials::password(&form.email, &form.password), form.remember,)"
+            ));
+            assert!(
+                app.read("src/routes.rs")
+                    .contains("LoginThrottle::request_context()")
+            );
+        });
     }
 
     /// Run `check` on a fresh scaffold of every kit.

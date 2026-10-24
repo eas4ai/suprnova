@@ -166,9 +166,9 @@ pub use app::paths::{
 pub use auth::{
     Auth, AuthConfig, AuthFlowUser, AuthManager, AuthMiddleware, Authenticatable,
     BasicAuthMiddleware, CanResetPassword, Credentials, DatabaseUserProvider, EloquentUserProvider,
-    GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, MustVerifyEmail,
-    RequestUserFuture, RequestUserResult, Session, SessionBuilder, SessionGuard, SessionToken,
-    StatefulGuard, TokenGuard, User, UserBuilder, UserId, UserProvider,
+    GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, LoginThrottle,
+    MustVerifyEmail, RequestUserFuture, RequestUserResult, Session, SessionBuilder, SessionGuard,
+    SessionToken, StatefulGuard, TokenGuard, User, UserBuilder, UserId, UserProvider,
 };
 pub use authorization::{Authorizable, Gate, GateEvaluated};
 // The crate root binds `Response` to the HTTP response contract, so the

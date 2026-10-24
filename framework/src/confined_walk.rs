@@ -152,7 +152,6 @@ impl ConfinedRoot {
     }
 
     /// The canonical root path.
-    #[cfg(feature = "filesystem")]
     pub(crate) fn path(&self) -> &Path {
         &self.root
     }

@@ -13,6 +13,10 @@ For the trait shapes themselves, env-var setup, and the bootstrap
 pattern, read [Payments](payments.md) first. This chapter is the
 Stripe-specific deep dive.
 
+Methods that put a provider ID in a request path require a nonempty ID
+containing only ASCII letters, digits, `_` or `-`. Other values return
+`PaymentError::Validation` before any provider request.
+
 ## Gateway, not Merchant of Record
 
 Stripe is by default a **payment gateway**: you receive funds directly

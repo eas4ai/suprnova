@@ -1,0 +1,451 @@
+//! Generic, application-bound user reads and credential writes.
+//!
+//! The user table belongs to the application; this store only performs the
+//! operations the authentication domains need, through [`UserFields`] and its
+//! sibling capabilities. Method *removal* is deliberately absent here: taking
+//! away a sign-in method must go through the census-guarded
+//! [`super::MethodStore`].
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, Condition, DbBackend, EntityTrait, ExprTrait, QueryFilter};
+
+use super::credential_writes::fenced_credential_write;
+use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error, random_id};
+use crate::password::{email_fits, email_too_long, normalize_email};
+use crate::schema::{
+    AuthSchema, EntityBinding, SessionEpoch, SessionFields, UserFields, UserOptionalFields,
+    password_hash_for_verifier,
+};
+use crate::sessions::JwtEpochStore;
+use crate::{Error, Result};
+
+/// A generic view of one application user row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRecord {
+    /// Application-owned user identifier.
+    pub user_id: String,
+    /// Normalized email address.
+    pub email: String,
+    /// Verifier-safe password hash; `None` for passwordless users. The
+    /// NOT-NULL empty sentinel never appears here.
+    pub password_hash: Option<String>,
+    /// Email-verification timestamp, when stamped.
+    pub email_verified_at: Option<DateTime<Utc>>,
+    /// Account lock timestamp, when locked.
+    pub locked_at: Option<DateTime<Utc>>,
+    /// Current authentication epoch.
+    pub auth_epoch: u64,
+}
+
+/// Input for creating one user row.
+#[derive(Clone, Debug)]
+pub struct NewUser {
+    /// Normalized email address.
+    pub email: String,
+    /// Already-hashed credential; `None` creates a passwordless user.
+    pub password_hash: Option<String>,
+}
+
+/// Storage API for generic user reads and credential writes.
+#[async_trait]
+pub trait UserStore: Send + Sync {
+    /// Find one user by byte equality of addresses after trim and lowercase
+    /// normalization. MySQL and MariaDB accent-insensitive collations can
+    /// match a different address; trusting that match could mint a victim's
+    /// magic-link token for an attacker-controlled mailbox.
+    async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>>;
+    /// Find one user by identifier.
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>>;
+    /// Create a user row and return its stored view.
+    async fn create_user(&self, input: NewUser) -> Result<UserRecord>;
+    /// Replace the stored credential hash while the authenticating actor remains live.
+    async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()>;
+    /// Stamp the email-verification timestamp.
+    async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<()>;
+    /// Stamp the email-verification timestamp only while the user's
+    /// address is still `email`, as stored: `Ok(true)` when it stamped,
+    /// `Ok(false)`, with nothing written, when the address changed or the
+    /// user is gone.
+    ///
+    /// A flow reads the address, checks that the proof it holds is for
+    /// that address, and then stamps. The address can change in between,
+    /// and a stamp that ignored it would verify an address the proof never
+    /// reached. So the check and the write are one storage operation here,
+    /// a conditional update.
+    ///
+    /// The default refuses, which keeps existing stores source-compatible;
+    /// a flow that needs it then fails closed.
+    async fn mark_email_verified_for(
+        &self,
+        user_id: &str,
+        email: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let _ = (user_id, email, at);
+        Err(Error::DependencyUnavailable {
+            dependency: "user store".to_owned(),
+            message: "this user store does not stamp an address on condition that it is unchanged"
+                .to_owned(),
+        })
+    }
+    /// Atomically stamp the lock timestamp when the matching user is either
+    /// unlocked or still carries a lock from a window older than
+    /// `window_start`. Returns true only for the caller that won the current
+    /// window's transition; unknown emails return false.
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> Result<bool>;
+    /// Stamp or clear the account lock timestamp by email. Unknown emails are
+    /// a silent no-op so lockout bookkeeping cannot leak account existence.
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        locked_at: Option<DateTime<Utc>>,
+    ) -> Result<()>;
+}
+
+/// What a sign-up's insert came to: the account it created, or the account
+/// a concurrent sign-up created first.
+pub(crate) enum SignUpAccount {
+    /// The insert created this account.
+    Created(UserRecord),
+    /// Another sign-up created the account for this address first.
+    Existing(UserRecord),
+}
+
+/// Create the account `input` describes, or answer with the account a
+/// concurrent sign-up created first.
+///
+/// Sign-ups look an address up and then insert. Two racing for one new
+/// address both miss the lookup, and a store with a unique email index
+/// refuses the second insert with [`Error::Conflict`]. The loser reads the
+/// address back and continues as for any address already on file, so the
+/// race never reaches the caller as an error. A conflict with no account to
+/// read back stays an error.
+pub(crate) async fn create_or_find_existing(
+    users: &dyn UserStore,
+    input: NewUser,
+) -> Result<SignUpAccount> {
+    let email = input.email.clone();
+    match users.create_user(input).await {
+        Ok(created) => Ok(SignUpAccount::Created(created)),
+        Err(conflict @ Error::Conflict { .. }) => match users.find_by_email(&email).await? {
+            Some(existing) => Ok(SignUpAccount::Existing(existing)),
+            None => Err(conflict),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+fn record<S>(model: &<S::User as EntityBinding>::Model) -> UserRecord
+where
+    S: AuthSchema,
+    S::User: UserFields + UserOptionalFields + SessionEpoch,
+{
+    UserRecord {
+        user_id: S::User::read_user_id(model),
+        email: S::User::read_email(model),
+        password_hash: password_hash_for_verifier::<S::User>(model),
+        email_verified_at: S::User::read_email_verified_at(model),
+        locked_at: S::User::read_locked_at(model),
+        auth_epoch: S::User::auth_epoch(model),
+    }
+}
+
+fn empty(field: &str) -> Error {
+    Error::InvalidInput {
+        field: field.to_owned(),
+        message: "must not be empty".to_owned(),
+    }
+}
+
+async fn set_password_hash_in_transaction<S>(
+    transaction: &mut AuthTransaction<'_>,
+    user_id: &str,
+    password_hash: &str,
+) -> Result<()>
+where
+    S: AuthSchema,
+    S::User: UserFields,
+{
+    let mut model = <S::User as EntityBinding>::ActiveModel::default();
+    S::User::write_password_hash(&mut model, Some(password_hash));
+    let update = <S::User as EntityBinding>::Entity::update_many()
+        .set(model)
+        .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+        .exec(transaction.connection())
+        .await
+        .map_err(db_error)?;
+    if update.rows_affected != 1 {
+        return Err(Error::NotFound {
+            resource: "user".to_owned(),
+            identifier: user_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl<S> UserStore for SeaOrmStorage<S>
+where
+    S: AuthSchema,
+    S::User: UserFields + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
+    <S::User as EntityBinding>::Entity: EntityTrait<
+            Model = <S::User as EntityBinding>::Model,
+            ActiveModel = <S::User as EntityBinding>::ActiveModel,
+        >,
+    <S::User as EntityBinding>::Column: ColumnTrait,
+{
+    async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>> {
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let normalized = normalize_email(email);
+        // Sign-up refuses an address this long, so no account holds one,
+        // and MySQL's column could not hold it either; the lookup is never
+        // sent.
+        if !email_fits(&normalized) {
+            return Ok(None);
+        }
+        let rows = <S::User as EntityBinding>::Entity::find()
+            .filter(S::User::email_column().eq(normalized.clone()))
+            .all(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(rows
+            .iter()
+            .find(|row| normalize_email(&S::User::read_email(row)) == normalized)
+            .map(record::<S>))
+    }
+
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>> {
+        if user_id.is_empty() {
+            return Err(empty("user_id"));
+        }
+        let rows = <S::User as EntityBinding>::Entity::find()
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+            .all(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(rows.first().map(record::<S>))
+    }
+
+    async fn create_user(&self, input: NewUser) -> Result<UserRecord> {
+        if input.email.is_empty() {
+            return Err(empty("email"));
+        }
+        if !email_fits(&input.email) {
+            return Err(email_too_long());
+        }
+        let user_id = random_id();
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_user_id(&mut model, &user_id);
+        S::User::write_email(&mut model, &input.email);
+        S::User::write_password_hash(&mut model, input.password_hash.as_deref());
+        S::User::write_locked_at(&mut model, None);
+        S::User::write_auth_epoch(&mut model, 0);
+        <S::User as EntityBinding>::Entity::insert(model)
+            .exec(self.database())
+            .await
+            .map_err(|error| match error.sql_err() {
+                // A unique email index refused the row: another sign-up
+                // created this address's account after the caller's lookup.
+                Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => Error::Conflict {
+                    resource: "user".to_owned(),
+                    message: "an account with this email address already exists".to_owned(),
+                },
+                _ => db_error(error),
+            })?;
+        self.find_by_id(&user_id)
+            .await?
+            .ok_or_else(|| Error::Internal {
+                message: "created user row could not be read back".to_owned(),
+            })
+    }
+
+    async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()> {
+        if actor.user_id().is_empty() {
+            return Err(empty("user_id"));
+        }
+        if password_hash.is_empty() {
+            return Err(empty("password_hash"));
+        }
+        let user_id = actor.user_id().to_owned();
+        let password_hash = password_hash.to_owned();
+        fenced_credential_write(self, actor, move |transaction| {
+            Box::pin(async move {
+                set_password_hash_in_transaction::<S>(transaction, &user_id, &password_hash).await
+            })
+        })
+        .await
+    }
+
+    async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<()> {
+        if user_id.is_empty() {
+            return Err(empty("user_id"));
+        }
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_email_verified_at(&mut model, Some(at));
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        if update.rows_affected != 1 {
+            return Err(Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Keep the address check inside the update so a concurrent change
+    /// refuses the stamp. MySQL and MariaDB need BINARY to bypass
+    /// accent-insensitive collations; Postgres and SQLite equality is exact.
+    async fn mark_email_verified_for(
+        &self,
+        user_id: &str,
+        email: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        if user_id.is_empty() {
+            return Err(empty("user_id"));
+        }
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_email_verified_at(&mut model, Some(at));
+        let exact_email = match self.database().get_database_backend() {
+            DbBackend::MySql => Expr::cust_with_exprs(
+                "BINARY ? = BINARY ?",
+                [
+                    Expr::col(S::User::email_column()),
+                    Expr::value(email.to_owned()),
+                ],
+            ),
+            DbBackend::Postgres | DbBackend::Sqlite => S::User::email_column().eq(email.to_owned()),
+            _ => {
+                return Err(Error::DependencyUnavailable {
+                    dependency: "user store".to_owned(),
+                    message: "exact email verification is unavailable for this database backend"
+                        .to_owned(),
+                });
+            }
+        };
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+            .filter(exact_email)
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
+    }
+
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> Result<bool> {
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let Some(user) = self.find_by_email(email).await? else {
+            return Ok(false);
+        };
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_locked_at(&mut model, Some(locked_at));
+        let lock_column = S::User::locked_at_column();
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(&user.user_id)))
+            .filter(
+                Condition::any()
+                    .add(lock_column.is_null())
+                    .add(S::User::locked_at_column().lt(window_start)),
+            )
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected > 0)
+    }
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        locked_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let Some(user) = self.find_by_email(email).await? else {
+            return Ok(());
+        };
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_locked_at(&mut model, locked_at);
+        // Absent emails are a deliberate no-op: lockout state is tracked for
+        // unknown identities too, and this write must not become an oracle.
+        let _ = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(&user.user_id)))
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<S> JwtEpochStore for SeaOrmStorage<S>
+where
+    S: AuthSchema,
+    S::User: UserFields + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
+    <S::User as EntityBinding>::Entity: EntityTrait<
+            Model = <S::User as EntityBinding>::Model,
+            ActiveModel = <S::User as EntityBinding>::ActiveModel,
+        >,
+    <S::User as EntityBinding>::Column: ColumnTrait,
+{
+    async fn current_auth_epoch(&self, user_id: &str) -> Result<u64> {
+        let user = self
+            .find_by_id(user_id)
+            .await?
+            .ok_or_else(|| Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            })?;
+        Ok(user.auth_epoch)
+    }
+
+    async fn bump_auth_epoch(&self, user_id: &str) -> Result<u64> {
+        if user_id.is_empty() {
+            return Err(empty("user_id"));
+        }
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .col_expr(
+                S::User::auth_epoch_column(),
+                Expr::col(S::User::auth_epoch_column()).add(1),
+            )
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        if update.rows_affected != 1 {
+            return Err(Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            });
+        }
+        self.current_auth_epoch(user_id).await
+    }
+}

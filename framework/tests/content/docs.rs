@@ -51,6 +51,105 @@ async fn write(path: &std::path::Path, text: &str) {
     tokio::fs::write(path, text).await.unwrap();
 }
 
+#[tokio::test]
+async fn docs_builder_refuses_absolute_chapter_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let outside = tmp.path().join("private.md");
+    write(&outside, "# Host secret\n").await;
+    write(
+        &src.join("documentation.md"),
+        &format!("# Contents\n\n- [Secret]({})\n", outside.display()),
+    )
+    .await;
+    let out = tmp.path().join("out");
+    let error = build_docs(DocsBuildConfig {
+        source_dir: src.clone(),
+        output_dir: out.clone(),
+        toc_file: src.join("documentation.md"),
+    })
+    .await
+    .expect_err("an absolute chapter path must not publish a host file");
+    let message = error.to_string();
+    assert!(message.contains("TOC line 3"), "{message}");
+    assert!(message.contains("absolute"), "{message}");
+    assert!(!out.exists(), "a refused TOC must write no artifacts");
+}
+
+#[tokio::test]
+async fn docs_builder_refuses_parent_components_in_chapter_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    write(&tmp.path().join("private.md"), "# Host secret\n").await;
+    write(&src.join("allowed.md"), "# Allowed\n").await;
+    for path in ["../private.md", "nested/../allowed.md"] {
+        tokio::fs::create_dir_all(src.join("nested")).await.unwrap();
+        write(
+            &src.join("documentation.md"),
+            &format!("# Contents\n\n- [Allowed](allowed.md)\n- [Secret]({path})\n"),
+        )
+        .await;
+        let out = tmp.path().join("out");
+        let error = build_docs(DocsBuildConfig {
+            source_dir: src.clone(),
+            output_dir: out.clone(),
+            toc_file: src.join("documentation.md"),
+        })
+        .await
+        .expect_err("a parent component must be refused even if it stays inside the root");
+        let message = error.to_string();
+        assert!(message.contains("TOC line 4"), "{message}");
+        assert!(message.contains("parent"), "{message}");
+        assert!(!out.exists(), "a refused TOC must write no artifacts");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn docs_builder_refuses_chapter_symlinks_outside_the_source_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    write(&tmp.path().join("private.md"), "# Host secret\n").await;
+    write(
+        &src.join("documentation.md"),
+        "# Contents\n\n- [Secret](linked.md)\n",
+    )
+    .await;
+    std::os::unix::fs::symlink("../private.md", src.join("linked.md")).unwrap();
+    let out = tmp.path().join("out");
+    let error = build_docs(DocsBuildConfig {
+        source_dir: src.clone(),
+        output_dir: out.clone(),
+        toc_file: src.join("documentation.md"),
+    })
+    .await
+    .expect_err("an escaping symlink must not publish a host file");
+    let message = error.to_string();
+    assert!(message.contains("TOC line 3"), "{message}");
+    assert!(message.contains("source root"), "{message}");
+    assert!(!out.exists(), "a refused TOC must write no artifacts");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn docs_builder_accepts_chapter_symlinks_inside_a_symlinked_source_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    write(&src.join("nested/chapter.md"), "# Local chapter\n").await;
+    write(&src.join("documentation.md"), "- [Chapter](./linked.md)\n").await;
+    std::os::unix::fs::symlink(src.join("nested/chapter.md"), src.join("linked.md")).unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&src, &alias).unwrap();
+    let catalog = build_docs(DocsBuildConfig {
+        source_dir: alias.clone(),
+        output_dir: tmp.path().join("out"),
+        toc_file: alias.join("documentation.md"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(catalog.chapters[0].title, "Local chapter");
+}
+
 /// DRIVERS-009: two chapters in different directories with the same file
 /// name map to one slug, so one would overwrite the other's `<slug>.json`
 /// while the catalog still listed both. The build refuses, naming both

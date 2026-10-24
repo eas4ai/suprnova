@@ -141,6 +141,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let router = router.try_live_with(|guard| {
         guard
             .middleware(AuthMiddleware::optional())
+            .middleware(suprnova::LoginThrottle::request_context())
             .middleware(tenant())
             .middleware(RateLimitMiddleware::new(
                 limiter,

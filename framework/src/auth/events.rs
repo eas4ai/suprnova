@@ -1,7 +1,7 @@
 //! Authentication lifecycle events.
 //!
-//! Five events mirroring `Illuminate\Auth\Events`, dispatched by the
-//! guards during the login lifecycle:
+//! Authentication events mirroring `Illuminate\Auth\Events`, dispatched by the
+//! guards or the starter login throttle during the login lifecycle:
 //!
 //! - [`Attempting`] - a credential login attempt began
 //!   ([`StatefulGuard::attempt`](super::StatefulGuard::attempt) /
@@ -13,12 +13,13 @@
 //! - [`Logout`] - a user logged out ([`logout`](super::StatefulGuard::logout)).
 //! - [`Failed`] - a credential attempt failed (bad password or unknown
 //!   identifier).
+//! - [`Lockout`] - the starter login budget refused the request.
 //!
-//! Every event carries the guard name plus stringy identifiers only - no
+//! Guard events carry the guard name plus stringy identifiers only - no
 //! plaintext passwords and no raw credential maps, matching the
 //! `auth_flows` events' "no sensitive data on the wire" contract. Email-
-//! keyed failed-attempt tracking is the job of
-//! `crate::auth_flows::BruteForce`, not these lifecycle events.
+//! keyed account lockouts belong to `crate::auth_flows::BruteForce`. Starter
+//! budgets use `LoginThrottle` and dispatch `Lockout` with request metadata.
 //!
 //! # Divergence: `Authenticated` fires on active authentication only
 //!
@@ -31,6 +32,19 @@
 //! every already-logged-in request.
 
 use crate::events::Event;
+
+/// Fires when a starter login budget refuses a request before authentication.
+#[derive(Debug, Clone)]
+pub struct Lockout {
+    /// Trusted HTTP metadata, without credentials, headers or query strings.
+    pub request: super::LoginThrottleRequest,
+}
+
+impl Event for Lockout {
+    fn event_name() -> &'static str {
+        "Auth\\Lockout"
+    }
+}
 
 /// Fires at the start of a credential login attempt, before the
 /// credentials are checked. Mirrors Laravel's `Attempting`.
@@ -130,6 +144,7 @@ mod tests {
             Login::event_name(),
             Logout::event_name(),
             Failed::event_name(),
+            Lockout::event_name(),
         ];
         let before = names.len();
         names.sort();

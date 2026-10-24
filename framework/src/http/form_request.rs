@@ -62,6 +62,13 @@ use validator::Validate;
 /// ```
 #[async_trait]
 pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
+    /// Additional input names excluded from classic validation redirects.
+    /// Password, password_confirmation and current_password are always excluded.
+    /// Names are also excluded inside nested objects and arrays.
+    fn dont_flash() -> &'static [&'static str] {
+        &[]
+    }
+
     /// Prepares input before authorization so validation sees normalized text.
     ///
     /// Register deferred changes with `Request::transform_input` to keep the body unread.
@@ -339,6 +346,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
                 parse_json(&bytes)
             }
         };
+        Request::exclude_old_input(&mut old_input, Self::dont_flash());
         let data: Self = match parsed {
             Ok(data) => data,
             Err(FrameworkError::Validation(errors)) if is_precognition => {

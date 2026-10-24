@@ -1,7 +1,7 @@
 //! Documentation catalog builder.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +97,18 @@ const CATALOG_SLUG: &str = "catalog";
 pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
     let toc = tokio::fs::read_to_string(&config.toc_file).await?;
     let entries = parse_toc_entries(&toc);
-    check_chapter_slugs(&config.source_dir, &entries).await?;
+    #[cfg(unix)]
+    let source = {
+        let source_dir = config.source_dir.clone();
+        tokio::task::spawn_blocking(move || crate::confined_walk::ConfinedRoot::new(source_dir))
+            .await
+            .map_err(std::io::Error::other)??
+    };
+    #[cfg(unix)]
+    let source_dir = source.path();
+    #[cfg(not(unix))]
+    let source_dir = &tokio::fs::canonicalize(&config.source_dir).await?;
+    let chapter_paths = check_chapter_slugs(source_dir, &entries).await?;
     let renderer = MarkdownRenderer::default();
 
     tokio::fs::create_dir_all(&config.output_dir).await?;
@@ -121,7 +132,7 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
     // Where each chapter's catalog and search entries were first pushed.
     let mut built: HashMap<&str, usize> = HashMap::with_capacity(reading_order.len());
 
-    for entry in &entries {
+    for (entry, markdown_path) in entries.iter().zip(chapter_paths) {
         if let Some(&first) = built.get(entry.slug.as_str())
             && let (Some(catalog), Some(search)) = (
                 catalog_entries.get(first).cloned(),
@@ -138,8 +149,11 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
             .and_then(|previous| reading_order.get(previous))
             .map(|&previous| previous.to_owned());
         let next = reading_order.get(at + 1).map(|&next| next.to_owned());
-        let markdown_path = config.source_dir.join(&entry.path);
-        let markdown = tokio::fs::read_to_string(markdown_path).await?;
+        #[cfg(unix)]
+        let markdown = read_chapter(&source, &markdown_path).await;
+        #[cfg(not(unix))]
+        let markdown = tokio::fs::read_to_string(markdown_path).await;
+        let markdown = markdown.map_err(|error| entry.error(error))?;
         let rewritten = rewrite_markdown_links(&markdown);
         let rendered = renderer.render(&rewritten)?;
         let title = rendered
@@ -200,22 +214,64 @@ struct TocEntry {
     title: String,
     path: PathBuf,
     slug: String,
+    line: usize,
 }
 
-/// Refuse a table of contents whose chapters would overwrite each other's
-/// artifacts. Files are compared by their canonical path, so `setup.md`
+impl TocEntry {
+    fn error(&self, error: std::io::Error) -> ContentError {
+        ContentError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "docs TOC line {} (`{}`): {error}",
+                self.line,
+                self.path.display()
+            ),
+        ))
+    }
+}
+
+/// Refuse chapters outside the source root or whose artifacts would overwrite
+/// each other. Files are compared by their canonical path, so `setup.md`
 /// and `./setup.md` are the same chapter while `guide/setup.md` and
 /// `api/setup.md` are two.
-async fn check_chapter_slugs(source_dir: &Path, entries: &[TocEntry]) -> ContentResult<()> {
+async fn check_chapter_slugs(
+    source_dir: &Path,
+    entries: &[TocEntry],
+) -> ContentResult<Vec<PathBuf>> {
     let mut owners: HashMap<&str, (PathBuf, &TocEntry)> = HashMap::new();
+    let mut paths = Vec::with_capacity(entries.len());
     for entry in entries {
+        if entry.path.is_absolute() {
+            return Err(entry.error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "absolute chapter paths are not allowed",
+            )));
+        }
+        if entry
+            .path
+            .components()
+            .any(|part| part == Component::ParentDir)
+        {
+            return Err(entry.error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "parent components in chapter paths are not allowed",
+            )));
+        }
         if entry.slug == CATALOG_SLUG {
             return Err(ContentError::ReservedChapterSlug {
                 slug: entry.slug.clone(),
                 path: entry.path.display().to_string(),
             });
         }
-        let file = tokio::fs::canonicalize(source_dir.join(&entry.path)).await?;
+        let file = tokio::fs::canonicalize(source_dir.join(&entry.path))
+            .await
+            .map_err(|error| entry.error(error))?;
+        if !file.starts_with(source_dir) {
+            return Err(entry.error(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "chapter resolves outside the source root",
+            )));
+        }
         match owners.get(entry.slug.as_str()) {
             Some((owner, first)) if *owner != file => {
                 return Err(ContentError::DuplicateChapterSlug {
@@ -226,21 +282,61 @@ async fn check_chapter_slugs(source_dir: &Path, entries: &[TocEntry]) -> Content
             }
             Some(_) => {}
             None => {
-                owners.insert(entry.slug.as_str(), (file, entry));
+                owners.insert(entry.slug.as_str(), (file.clone(), entry));
             }
         }
+        paths.push(file);
     }
-    Ok(())
+    Ok(paths)
+}
+
+/// Resolve again beneath the root and read the opened handle, so replacing a
+/// checked chapter or directory with an escaping symlink cannot redirect the read.
+#[cfg(unix)]
+async fn read_chapter(
+    source: &crate::confined_walk::ConfinedRoot,
+    path: &Path,
+) -> std::io::Result<String> {
+    use crate::confined_walk::{Last, open_file_in};
+    use std::io::Read;
+
+    let relative = path
+        .strip_prefix(source.path())
+        .map_err(std::io::Error::other)?
+        .to_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chapter path is not UTF-8",
+            )
+        })?
+        .to_owned();
+    let source = source.clone();
+    tokio::task::spawn_blocking(move || {
+        let entry = source.resolve(&relative, Last::Follow, false)?;
+        let (mut file, _) = open_file_in(&entry.dir, &entry.name, &relative)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chapter is not a regular file",
+            )
+        })?;
+        let mut markdown = String::new();
+        file.read_to_string(&mut markdown)?;
+        Ok(markdown)
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn parse_toc_entries(markdown: &str) -> Vec<TocEntry> {
     markdown
         .lines()
-        .filter_map(parse_toc_line)
+        .enumerate()
+        .filter_map(|(line, text)| parse_toc_line(text, line + 1))
         .collect::<Vec<_>>()
 }
 
-fn parse_toc_line(line: &str) -> Option<TocEntry> {
+fn parse_toc_line(line: &str, line_number: usize) -> Option<TocEntry> {
     let title_start = line.find('[')? + 1;
     let title_end = line[title_start..].find(']')? + title_start;
     let path_start = line[title_end..].find('(')? + title_end + 1;
@@ -256,6 +352,7 @@ fn parse_toc_line(line: &str) -> Option<TocEntry> {
         title: title.to_owned(),
         path: PathBuf::from(path),
         slug: slug_from_markdown_path(path),
+        line: line_number,
     })
 }
 

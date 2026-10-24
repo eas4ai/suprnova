@@ -144,6 +144,11 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | HTTP/2 + WebSocket on the same socket | `hyper.with_upgrades()` in `Server::run` | [Lifecycle](lifecycle.md) |
 | Markdown content + docs pipeline | `MarkdownRenderer` (sanitised comrak → syntect → ammonia) + `build_docs(DocsBuildConfig)` → searchable `DocsCatalog` of `DocsChapter`s | Heading extraction + `slugify_heading`; powers Markdown docs / blog with no separate static-site generator |
 
+The docs builder requires chapter paths relative to the canonical source root.
+It refuses absolute paths, parent components and symlinks that escape that root,
+naming the TOC line before writing any artifacts. Symlinks within the root are
+allowed.
+
 ## Security
 
 | Laravel | Suprnova | Status | Notes / link |

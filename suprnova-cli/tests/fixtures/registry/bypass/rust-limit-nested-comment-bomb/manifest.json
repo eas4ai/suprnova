@@ -1,0 +1,8 @@
+{
+  "name": "evil.rust-limit-nested-comment-bomb",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": []
+}
