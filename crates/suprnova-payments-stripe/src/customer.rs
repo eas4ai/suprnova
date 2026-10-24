@@ -142,6 +142,7 @@ impl CustomerStore for StripeProvider {
     }
 
     async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        crate::validate_provider_id(&req.provider_customer_id, "provider_customer_id")?;
         let path = format!("/customers/{}", req.provider_customer_id);
         let params = UpdateCustomerParams {
             email: req.email.as_deref(),
@@ -169,6 +170,7 @@ impl CustomerStore for StripeProvider {
     }
 
     async fn get_customer(&self, provider_customer_id: &str) -> PaymentResult<CustomerRef> {
+        crate::validate_provider_id(provider_customer_id, "provider_customer_id")?;
         let path = format!("/customers/{provider_customer_id}");
         let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<Customer>()
@@ -186,6 +188,7 @@ impl CustomerStore for StripeProvider {
     }
 
     async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
+        crate::validate_provider_id(provider_customer_id, "provider_customer_id")?;
         let path = format!("/customers/{provider_customer_id}");
         // Stripe customer deletion returns a DeletedCustomer object.
         // We only care that the call succeeded - discard the result.

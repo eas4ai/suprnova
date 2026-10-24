@@ -341,6 +341,7 @@ impl Subscription for StripeProvider {
     }
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(&req.provider_subscription_id, "provider_subscription_id")?;
         if let Some(prices) = &req.new_price_refs {
             return self.change_prices(&req, prices).await;
         }
@@ -367,6 +368,7 @@ impl Subscription for StripeProvider {
         provider_subscription_id: &str,
         at_period_end: bool,
     ) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(provider_subscription_id, "provider_subscription_id")?;
         if at_period_end {
             let path = format!("/subscriptions/{provider_subscription_id}");
             let params = UpdateSubscriptionParams {
@@ -398,6 +400,7 @@ impl Subscription for StripeProvider {
     }
 
     async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(provider_subscription_id, "provider_subscription_id")?;
         let path = format!("/subscriptions/{provider_subscription_id}");
         let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<StripeSubscription>()

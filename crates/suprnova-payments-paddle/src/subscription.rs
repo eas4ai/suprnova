@@ -192,6 +192,7 @@ impl Subscription for PaddleProvider {
     }
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(&req.provider_subscription_id, "provider_subscription_id")?;
         if let Some(prices) = &req.new_price_refs {
             return self.change_prices(&req, prices).await;
         }
@@ -241,6 +242,7 @@ impl Subscription for PaddleProvider {
         provider_subscription_id: &str,
         at_period_end: bool,
     ) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(provider_subscription_id, "provider_subscription_id")?;
         if at_period_end {
             // The subscription stays active and Paddle schedules the
             // cancellation for the end of the billing period.
@@ -278,6 +280,7 @@ impl Subscription for PaddleProvider {
     }
 
     async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
+        crate::validate_provider_id(provider_subscription_id, "provider_subscription_id")?;
         let current = self.snapshot(provider_subscription_id).await?;
         Ok(map_subscription_with_include(&current))
     }

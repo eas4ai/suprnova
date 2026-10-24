@@ -229,6 +229,7 @@ impl Payment for StripeProvider {
 
     /// Capture a previously-authorised (requires_capture) PaymentIntent.
     async fn capture(&self, provider_transaction_id: &str) -> PaymentResult<ChargeResult> {
+        crate::validate_provider_id(provider_transaction_id, "provider_transaction_id")?;
         let path = format!("/payment_intents/{provider_transaction_id}/capture");
         let call = RequestBuilder::new(StripeMethod::Post, &path)
             .customize::<PaymentIntent>()
@@ -266,6 +267,7 @@ impl Payment for StripeProvider {
     /// Returns `PaymentError::Validation` if the intent is already captured
     /// (Stripe will reject the cancel call in that state; use `refund` instead).
     async fn void(&self, provider_transaction_id: &str) -> PaymentResult<()> {
+        crate::validate_provider_id(provider_transaction_id, "provider_transaction_id")?;
         let path = format!("/payment_intents/{provider_transaction_id}/cancel");
 
         let call = RequestBuilder::new(StripeMethod::Post, &path)
@@ -299,6 +301,7 @@ impl Payment for StripeProvider {
 
     /// Retrieve the current status of a PaymentIntent.
     async fn status(&self, provider_transaction_id: &str) -> PaymentResult<PaymentStatus> {
+        crate::validate_provider_id(provider_transaction_id, "provider_transaction_id")?;
         let path = format!("/payment_intents/{provider_transaction_id}");
 
         let call = RequestBuilder::new(StripeMethod::Get, &path)

@@ -72,6 +72,20 @@ fn require_nonempty(name: &str, val: String) -> Result<String, String> {
     }
 }
 
+/// Keep IDs opaque when the SDK interpolates them into request paths.
+pub(crate) fn validate_provider_id(id: &str, field: &str) -> PaymentResult<()> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(PaymentError::Validation(format!(
+            "{field} must be nonempty and contain only ASCII letters, digits, '_' or '-'"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn reject_unsupported_idempotency_key(
     key: Option<&str>,
     operation: &str,

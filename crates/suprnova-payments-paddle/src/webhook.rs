@@ -249,10 +249,8 @@ fn checked_paddle_payment_snapshot(event: &WebhookEvent) -> PaymentResult<Option
 /// pinned SDK, so this check is what keeps a malformed header a 401
 /// instead of an unwind.
 ///
-/// Deliberately permissive about everything else - key order, unknown
-/// keys, the timestamp - because the SDK owns that parsing and already
-/// errors cleanly on it. This guards exactly the input that does not
-/// error cleanly.
+/// The SDK owns the remaining header syntax. Timestamp range validation
+/// runs separately because the SDK's timestamp arithmetic can also panic.
 fn validate_signature_digests(signature: &str) -> PaymentResult<()> {
     for segment in signature.split(';') {
         let Some((key, value)) = segment.split_once('=') else {
@@ -274,6 +272,37 @@ fn validate_signature_digests(signature: &str) -> PaymentResult<()> {
                 "paddle signature digest `{key}` contains a non-hex character `{bad}`"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Refuse timestamps outside the replay window before the SDK adds its variance.
+fn validate_signature_timestamp(
+    signature: &str,
+    now: i64,
+    maximum_variance: &MaximumVariance,
+) -> PaymentResult<()> {
+    let timestamp = signature
+        .split(';')
+        .filter_map(|segment| segment.split_once('='))
+        .find_map(|(key, value)| (key == "ts").then_some(value))
+        .ok_or_else(|| {
+            PaymentError::WebhookSignature("missing timestamp in paddle-signature header".into())
+        })?
+        .parse::<i64>()
+        .map_err(|_| {
+            PaymentError::WebhookSignature("invalid timestamp in paddle-signature header".into())
+        })?;
+    let datetime = chrono::DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+        PaymentError::WebhookSignature("paddle signature timestamp outside supported range".into())
+    })?;
+    if let Some(variance) = maximum_variance.0
+        && (datetime.checked_add_signed(variance).is_none()
+            || now.abs_diff(timestamp) > variance.num_seconds() as u64)
+    {
+        return Err(PaymentError::WebhookSignature(
+            "paddle signature timestamp outside tolerance window".into(),
+        ));
     }
     Ok(())
 }
@@ -311,17 +340,14 @@ impl WebhookHandler for PaddleProvider {
         // authenticates it - so anyone who knows the URL can reach the
         // panic. Check the digest before handing it over.
         validate_signature_digests(signature)?;
+        let maximum_variance = MaximumVariance::default();
+        validate_signature_timestamp(signature, chrono::Utc::now().timestamp(), &maximum_variance)?;
 
         let body_str = std::str::from_utf8(ctx.body)
             .map_err(|_| PaymentError::WebhookSignature("non-utf8 webhook body".into()))?;
 
-        Paddle::unmarshal(
-            body_str,
-            self.webhook_key(),
-            signature,
-            MaximumVariance::default(),
-        )
-        .map_err(|e| PaymentError::WebhookSignature(format!("paddle signature verify: {e}")))?;
+        Paddle::unmarshal(body_str, self.webhook_key(), signature, maximum_variance)
+            .map_err(|e| PaymentError::WebhookSignature(format!("paddle signature verify: {e}")))?;
 
         Ok(())
     }
@@ -1131,6 +1157,62 @@ mod signature_hex_tests {
         p.verify(&ctx)
     }
 
+    #[test]
+    fn extreme_timestamps_are_refused_without_unwinding() {
+        for timestamp in [
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+                .timestamp()
+                .to_string(),
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+                .timestamp()
+                .to_string(),
+            i64::MAX.to_string(),
+            i64::MIN.to_string(),
+            "9223372036854775808".into(),
+            "not-a-number".into(),
+        ] {
+            let signature = format!("ts={timestamp};h1=0123456789abcdef");
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify_with(&signature)))
+                    .expect("an untrusted timestamp must return an error without unwinding");
+            assert!(matches!(result, Err(PaymentError::WebhookSignature(_))));
+        }
+    }
+
+    #[test]
+    fn future_timestamps_are_refused_before_signature_verification() {
+        let timestamp = chrono::Utc::now().timestamp() + 3600;
+        let error = verify_with(&format!("ts={timestamp};h1=0123456789abcdef"))
+            .expect_err("a far-future timestamp must be refused");
+        assert!(
+            matches!(error, PaymentError::WebhookSignature(ref message) if message.contains("timestamp outside")),
+            "expected a timestamp refusal before the SDK, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn timestamp_guard_checks_both_edges_of_the_sdk_variance() {
+        let now = 1_700_000_000;
+        let variance = MaximumVariance::default();
+        for (offset, accepted) in [
+            (-6, false),
+            (-5, true),
+            (-4, true),
+            (0, true),
+            (4, true),
+            (5, true),
+            (6, false),
+        ] {
+            for signature in [
+                format!("ts={};h1=0123456789abcdef", now + offset),
+                format!("h1=0123456789abcdef;ts={}", now + offset),
+            ] {
+                let result = validate_signature_timestamp(&signature, now, &variance);
+                assert_eq!(result.is_ok(), accepted, "offset {offset}: {result:?}");
+            }
+        }
+    }
+
     /// The headline case. Probed against the pinned SDK before writing the
     /// fix: `h1=abc` panicked inside `Paddle::unmarshal` rather than
     /// returning an error. `catch_unwind` rather than a plain call, so this
@@ -1175,11 +1257,12 @@ mod signature_hex_tests {
     /// while breaking every real webhook.
     #[test]
     fn a_well_formed_digest_reaches_the_sdk() {
-        let err = verify_with("ts=1671552777;h1=0123456789abcdef")
+        let timestamp = chrono::Utc::now().timestamp();
+        let err = verify_with(&format!("ts={timestamp};h1=0123456789abcdef"))
             .expect_err("a wrong-but-well-formed digest must still fail verification");
         let message = format!("{err}");
         assert!(
-            !message.contains("odd number") && !message.contains("non-hex"),
+            message.contains("paddle signature verify:"),
             "a well-formed digest must be rejected by the SDK's own \
              verification, not by the hex guard; got: {message}"
         );

@@ -4,8 +4,9 @@ use std::sync::Once;
 use std::time::Duration;
 
 use suprnova::payments::{
-    ChargeRequest, Checkout, Currency, Money, Payment, PaymentError, RefundRequest, SessionMode,
-    StartSessionRequest, SubscribeRequest, Subscription, UpdateSubscriptionRequest,
+    ChargeRequest, Checkout, Currency, CustomerStore, Money, Payment, PaymentError, RefundRequest,
+    SessionMode, StartSessionRequest, SubscribeRequest, Subscription, UpdateCustomerRequest,
+    UpdateSubscriptionRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -585,6 +586,116 @@ async fn session_status_rejects_invalid_identifiers_before_network() {
         assert!(
             received.is_err(),
             "invalid identifier reached provider: {identifier}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_ids_are_single_path_segments_before_network() {
+    let (base_url, mut capture) = capture_server_with_response(None).await;
+    let provider = provider(base_url);
+    for id in [
+        "pi_target/capture?x=",
+        "id/other",
+        "id?query=value",
+        "id#fragment",
+        ".",
+        "..",
+        "id/../other",
+        "id%2fother",
+        "%2e%2e",
+        "id%252fother",
+        "id\\other",
+        "id value",
+        " id",
+        "id\tvalue",
+        "id\nvalue",
+        "id\0value",
+        "id\u{7f}value",
+        "id\u{a0}value",
+        "",
+    ] {
+        for operation in [
+            "capture",
+            "void",
+            "status",
+            "get_customer",
+            "delete_customer",
+            "update_customer",
+            "get",
+            "cancel_later",
+            "cancel_now",
+            "update",
+            "change_prices",
+        ] {
+            let result = match operation {
+                "capture" => provider.capture(id).await.map(|_| ()),
+                "void" => provider.void(id).await,
+                "status" => provider.status(id).await.map(|_| ()),
+                "get_customer" => provider.get_customer(id).await.map(|_| ()),
+                "delete_customer" => provider.delete_customer(id).await,
+                "update_customer" => provider
+                    .update_customer(UpdateCustomerRequest {
+                        provider_customer_id: id.into(),
+                        email: None,
+                        name: None,
+                        metadata: None,
+                    })
+                    .await
+                    .map(|_| ()),
+                "get" => provider.get(id).await.map(|_| ()),
+                "cancel_later" | "cancel_now" => provider
+                    .cancel(id, operation == "cancel_later")
+                    .await
+                    .map(|_| ()),
+                "update" | "change_prices" => provider
+                    .update(UpdateSubscriptionRequest {
+                        provider_subscription_id: id.into(),
+                        new_price_refs: (operation == "change_prices")
+                            .then(|| vec!["price_test".into()]),
+                        proration: None,
+                        cancel_at_period_end: None,
+                        idempotency_key: None,
+                    })
+                    .await
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(result, Err(PaymentError::Validation(_))),
+                "operation {operation} must refuse {id:?} before sending: {result:?}"
+            );
+        }
+    }
+    let received = tokio::time::timeout(Duration::from_millis(100), &mut capture).await;
+    capture.abort();
+    assert!(received.is_err(), "an invalid provider ID reached Stripe");
+}
+
+#[tokio::test]
+async fn valid_payment_ids_keep_the_authenticated_request_target() {
+    for (operation, method, suffix) in [
+        ("capture", "POST", "/capture"),
+        ("void", "POST", "/cancel"),
+        ("status", "GET", ""),
+    ] {
+        let (base_url, capture) = capture_server_with_response(None).await;
+        let provider = provider(base_url);
+        let result = match operation {
+            "capture" => provider.capture("pi_contract_123").await.map(|_| ()),
+            "void" => provider.void("pi_contract_123").await,
+            "status" => provider.status("pi_contract_123").await.map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(matches!(result, Err(PaymentError::Provider(_))));
+        let request = capture.await.expect("capture a valid payment ID");
+        assert_eq!(
+            request.request_line,
+            format!("{method} /v1/payment_intents/pi_contract_123{suffix} HTTP/1.1")
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer sk_test_request_capture")
         );
     }
 }

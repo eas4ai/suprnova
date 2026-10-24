@@ -60,6 +60,7 @@ impl PaddleProvider {
     /// and `custom_data` of the customer stay as they are. A customer that
     /// Paddle does not know is `PaymentError::NotFound`.
     pub async fn archive_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
+        crate::validate_provider_id(provider_customer_id, "provider_customer_id")?;
         deadline::change(
             "customer_update (archive)",
             self.client()
@@ -110,6 +111,7 @@ impl CustomerStore for PaddleProvider {
     }
 
     async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        crate::validate_provider_id(&req.provider_customer_id, "provider_customer_id")?;
         let mut builder = self
             .client()
             .customer_update(req.provider_customer_id.clone());
@@ -146,6 +148,7 @@ impl CustomerStore for PaddleProvider {
     }
 
     async fn get_customer(&self, provider_customer_id: &str) -> PaymentResult<CustomerRef> {
+        crate::validate_provider_id(provider_customer_id, "provider_customer_id")?;
         let resp = deadline::read(
             "customer_get",
             self.client()

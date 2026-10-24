@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use paddle_rust_sdk::Paddle;
 use suprnova::payments::{
-    Checkout, PaymentError, SessionMode, StartSessionRequest, Subscription,
-    UpdateSubscriptionRequest,
+    Checkout, CustomerStore, PaymentError, SessionMode, StartSessionRequest, Subscription,
+    UpdateCustomerRequest, UpdateSubscriptionRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -91,4 +91,81 @@ async fn unsupported_idempotency_keys_fail_before_paddle_mutations() {
         !update_reached_endpoint,
         "keyed Paddle update reached the provider endpoint"
     );
+}
+
+#[tokio::test]
+async fn provider_ids_are_single_path_segments_before_network() {
+    use crate::mocked_paddle::{paddle_error, paddle_with};
+
+    let (provider, requests) = paddle_with(vec![(400, paddle_error("bad_request"))]).await;
+    for id in [
+        "sub_target/cancel?x=",
+        "id/other",
+        "id?query=value",
+        "id#fragment",
+        ".",
+        "..",
+        "id/../other",
+        "id%2fother",
+        "%2e%2e",
+        "id%252fother",
+        "id\\other",
+        "id value",
+        " id",
+        "id\tvalue",
+        "id\nvalue",
+        "id\0value",
+        "id\u{7f}value",
+        "id\u{a0}value",
+        "",
+    ] {
+        for operation in [
+            "cancel_later",
+            "cancel_now",
+            "get",
+            "archive_customer",
+            "get_customer",
+            "update_customer",
+            "update",
+            "schedule_cancellation",
+            "change_prices",
+        ] {
+            let result = match operation {
+                "cancel_later" | "cancel_now" => provider
+                    .cancel(id, operation == "cancel_later")
+                    .await
+                    .map(|_| ()),
+                "get" => provider.get(id).await.map(|_| ()),
+                "archive_customer" => provider.archive_customer(id).await,
+                "get_customer" => provider.get_customer(id).await.map(|_| ()),
+                "update_customer" => provider
+                    .update_customer(UpdateCustomerRequest {
+                        provider_customer_id: id.into(),
+                        email: None,
+                        name: None,
+                        metadata: None,
+                    })
+                    .await
+                    .map(|_| ()),
+                "update" | "schedule_cancellation" | "change_prices" => provider
+                    .update(UpdateSubscriptionRequest {
+                        provider_subscription_id: id.into(),
+                        new_price_refs: (operation == "change_prices")
+                            .then(|| vec!["pri_test".into()]),
+                        proration: None,
+                        cancel_at_period_end: (operation == "schedule_cancellation")
+                            .then_some(true),
+                        idempotency_key: None,
+                    })
+                    .await
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(result, Err(PaymentError::Validation(_))),
+                "operation {operation} must refuse {id:?} before sending: {result:?}"
+            );
+        }
+    }
+    assert!(requests.lock().expect("request log").is_empty());
 }
