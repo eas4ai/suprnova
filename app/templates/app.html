@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    {{ title }}
+    {{ head }}
+    {% if let Some(description) = view.get("description") %}
+    <meta name="description" content="{{ description }}" />
+    {% endif %}
+  </head>
+  <body>
+    <noscript>The Suprnova dogfood app needs JavaScript.</noscript>
+    {{ body }}
+  </body>
+</html>
