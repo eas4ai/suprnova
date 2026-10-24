@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.password-input",
+  "files": [
+    "password-input.html",
+    "password-input.css",
+    "password-input.js"
+  ],
+  "elements": [
+    "sn-password-reveal"
+  ]
+}
