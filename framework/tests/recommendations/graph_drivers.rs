@@ -10,6 +10,103 @@ mod hydra;
 use suprnova::GraphStore;
 use suprnova::RecommendConfig;
 
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_http_requires_https_in_production() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_http_requires_https_in_production_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_http_requires_https_in_production_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env();
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    let mut config = RecommendConfig {
+        graph_store: "hydradb".into(),
+        ..Default::default()
+    };
+    for environment in [None, Some("production"), Some("PROD"), Some("testing")] {
+        crate::env_snapshot::set_env("APP_ENV", environment);
+        if environment == Some("testing") {
+            suprnova::Config::register(
+                suprnova::AppConfig::builder()
+                    .environment(suprnova::Environment::Production)
+                    .build(),
+            );
+        }
+        assert!(suprnova::Config::is_production());
+        for host in ["localhost", "127.0.0.1", "[::1]", "graph.example.com"] {
+            config.graph_url = Some(format!("http://{host}:8443/v1/graphs/default/query"));
+            let error = config.validate().expect_err("HTTP must fail in production");
+            let message = error.to_string();
+            assert!(message.contains("RECOMMEND_GRAPH_URL"), "{message}");
+            assert!(message.contains("HTTPS"), "{message}");
+            config.graph_url = Some(format!("https://{host}:8443/v1/graphs/default/query"));
+            config
+                .validate()
+                .expect("HTTPS remains valid in production");
+        }
+    }
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_http_loopback_is_limited_to_development_and_testing() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_http_loopback_is_limited_to_development_and_testing_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_http_loopback_is_limited_to_development_and_testing_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env();
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("production"));
+    let mut config = RecommendConfig {
+        graph_store: "hydradb".into(),
+        ..Default::default()
+    };
+    for environment in [
+        suprnova::Environment::Local,
+        suprnova::Environment::Development,
+        suprnova::Environment::Testing,
+        suprnova::Environment::Staging,
+        suprnova::Environment::Custom("preview".into()),
+    ] {
+        let allow_http = matches!(
+            environment,
+            suprnova::Environment::Local
+                | suprnova::Environment::Development
+                | suprnova::Environment::Testing
+        );
+        suprnova::Config::register(
+            suprnova::AppConfig::builder()
+                .environment(environment.clone())
+                .build(),
+        );
+        for host in ["localhost", "127.0.0.1", "[::1]", "graph.example.com"] {
+            config.graph_url = Some(format!("http://{host}:8443/v1/graphs/default/query"));
+            let result = config.validate();
+            assert_eq!(
+                result.is_ok(),
+                allow_http && host != "graph.example.com",
+                "{environment:?} with {host}: {result:?}"
+            );
+            config.graph_url = Some(format!("https://{host}:8443/v1/graphs/default/query"));
+            config.validate().expect("HTTPS remains valid");
+        }
+    }
+}
+
 #[test]
 fn rec_010_boot_rejects_unknown_and_unavailable_graph_drivers() {
     for (name, unavailable) in [
@@ -206,13 +303,30 @@ fn rec_010_hydradb_native_statements_avoid_unsupported_cypher() {
 }
 
 #[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_refuses_node_and_edge_numeric_identity_collisions() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_refuses_node_and_edge_numeric_identity_collisions_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
 #[tokio::test]
-async fn rec_010_hydradb_refuses_node_and_edge_numeric_identity_collisions() {
+async fn rec_010_hydradb_refuses_node_and_edge_numeric_identity_collisions_child() {
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method},
     };
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Testing)
+            .build(),
+    );
+
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_partial_json(json!({"query":hydra::HEAD})))
@@ -281,14 +395,31 @@ async fn rec_010_hydradb_refuses_node_and_edge_numeric_identity_collisions() {
 }
 
 #[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_http_pages_reuse_query_identity_without_replaying_read_epoch() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_http_pages_reuse_query_identity_without_replaying_read_epoch_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
 #[tokio::test]
-async fn rec_010_hydradb_http_pages_reuse_query_identity_without_replaying_read_epoch() {
+async fn rec_010_hydradb_http_pages_reuse_query_identity_without_replaying_read_epoch_child() {
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use wiremock::{
         Mock, MockServer, Request, Respond, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Testing)
+            .build(),
+    );
 
     let nodes: Vec<_> = ["one", "two"]
         .map(|key| suprnova::GraphNode {

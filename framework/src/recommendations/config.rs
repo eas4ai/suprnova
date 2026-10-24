@@ -1,6 +1,6 @@
 //! Typed configuration keeps recording and generation on the same scoring contract.
 use super::event::EventScoring;
-use crate::{Config, FrameworkError};
+use crate::{Config, FrameworkError, config::Environment};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -377,14 +377,18 @@ impl RecommendConfig {
             let hydra_http = self.graph_store == "hydradb"
                 && (url.scheme() == "https"
                     || (url.scheme() == "http"
-                        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))));
+                        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+                        && matches!(
+                            Config::environment(),
+                            Environment::Local | Environment::Development | Environment::Testing
+                        )));
             if url.host_str().is_none()
                 || !url.username().is_empty()
                 || url.password().is_some()
                 || (!matches!(url.scheme(), "bolt" | "bolt+s") && !hydra_http)
             {
                 return Err(FrameworkError::param(
-                    "RECOMMEND_GRAPH_URL: expected bolt:// or bolt+s:// without credentials; hydradb also accepts an HTTPS query URL (HTTP only on loopback)",
+                    "RECOMMEND_GRAPH_URL: expected bolt:// or bolt+s:// without credentials; hydradb also accepts an HTTPS query URL (HTTP only on loopback in local, development or testing environments)",
                 ));
             }
         }

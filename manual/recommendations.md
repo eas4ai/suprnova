@@ -327,8 +327,9 @@ selects:
   `https://graph.example.com:8443/v1/graphs/default/query`. Set the username
   to the namespace (default `default`) and the password to the server's bearer
   token. Append `?cell_id=cell-1` for a cell other than `cell-0`. Plain HTTP is
-  accepted only on loopback for development. HydraDB maintains label and
-  property indexes on writes and rejects `CREATE INDEX`; the driver sends no
+  accepted only on loopback in `local`, `development` or `testing` environments;
+  production, including an unset `APP_ENV`, requires HTTPS. HydraDB maintains
+  label and property indexes on writes and rejects `CREATE INDEX`; the driver sends no
   unsupported DDL. It uses numeric identities, scalar property projections
   and auto-commit statements instead of Memgraph's transaction and Cypher
   extensions. The driver also accepts Bolt URLs for endpoints compatible with

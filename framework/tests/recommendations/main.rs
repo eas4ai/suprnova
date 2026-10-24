@@ -1,4 +1,14 @@
 //! Recommendation contracts run against an isolated database.
+#[cfg(feature = "graph-hydradb")]
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[cfg(feature = "graph-hydradb")]
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
+#[cfg(feature = "graph-hydradb")]
+#[path = "../support/own_process.rs"]
+mod own_process;
+
 mod budget;
 mod events;
 mod graph;
